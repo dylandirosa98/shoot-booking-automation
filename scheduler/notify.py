@@ -21,6 +21,10 @@ def shoot_failed(shoot: Shoot) -> bool:
         for i in invites
     ) or "  (no invites were sent)"
 
+    import os
+    base = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    dashboard_url = f"https://{base}/shoots/{shoot.id}/" if base else f"http://127.0.0.1:8000/shoots/{shoot.id}/"
+
     body = (
         f"Heads up: nobody accepted the shoot below. You'll need to find a videographer manually.\n\n"
         f"  Shoot:    {shoot.title or 'Untitled'}\n"
@@ -28,7 +32,7 @@ def shoot_failed(shoot: Shoot) -> bool:
         f"  Location: {shoot.location}\n"
         f"  Pipedrive activity: {shoot.pipedrive_activity_id or 'n/a'}\n\n"
         f"Invite chain results:\n{chain}\n\n"
-        f"Dashboard: http://127.0.0.1:8000/shoots/{shoot.id}/\n"
+        f"Dashboard: {dashboard_url}\n"
     )
     subject = f"[Shoot Scheduler] FAILED — manual booking needed: {shoot.title or shoot.location}"
     return send_email(to, subject, body)
