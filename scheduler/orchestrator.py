@@ -1,0 +1,507 @@
+"""
+Booking orchestrator: the heart of the app.
+
+Flow:
+    1. Webhook calls handle_new_shoot(payload)
+    2. Geocode the location
+    3. Rank videographers
+    4. Save Shoot row + create first Invite
+    5. Send calendar invite (via calendar_client)
+    6. Schedule a 24h escalation job
+    7. When 24h job fires: check acceptance, escalate if needed
+"""
+import logging
+from datetime import datetime, timedelta
+from django.utils import timezone
+from .models import Videographer, Shoot, Invite, SchedulingSettings
+from .geocode import geocode, geocode_with_fallback
+from . import notify
+from .scoring import rank_for_shoot
+from .calendar_client import get_client
+
+logger = logging.getLogger(__name__)
+
+
+# --- helpers ---
+
+def _state_from_location(location: str) -> str | None:
+    """Best-effort 2-letter state extraction from an address string."""
+    parts = [p.strip() for p in location.split(",")]
+    for p in reversed(parts):
+        token = p.split()[0] if p else ""
+        if len(token) == 2 and token.isalpha():
+            return token.upper()
+    return None
+
+
+def _invite_message(shoot: Shoot, videographer: Videographer, miles: float, minutes: float) -> str:
+    first_name = videographer.name.split()[0] if videographer.name else "there"
+    sections = [
+        f"Hi {first_name},",
+        "You're our top pick for an upcoming hockey shoot. Details:",
+        (f"  Location: {shoot.location}\n"
+         f"  When:     {shoot.shoot_datetime:%A, %B %-d at %-I:%M %p}\n"
+         f"  Distance: ~{miles:.0f} mi (~{minutes:.0f} min drive)"),
+    ]
+    if shoot.notes and shoot.notes.strip():
+        sections.append("Shoot details / notes from the team:\n" + shoot.notes.strip())
+    sections.append(
+        "Please accept or decline this calendar invite within 24 hours.\n"
+        "If we don't hear back, we'll offer it to the next videographer."
+    )
+    return "\n\n".join(sections)
+
+
+# --- main entry point ---
+
+def handle_updated_shoot(
+    *,
+    pipedrive_deal_id: str,
+    pipedrive_activity_id: str | None = None,
+    title: str,
+    location: str,
+    shoot_datetime: datetime,
+    duration_minutes: int = 120,
+    notes: str = "",
+    prefilled_lat: float | None = None,
+    prefilled_lng: float | None = None,
+    prefilled_state: str | None = None,
+    location_city: str | None = None,
+    location_street: str | None = None,
+) -> tuple[Shoot, str]:
+    """
+    Pipedrive activity 'change' event. Returns (shoot, action_taken).
+    action_taken is one of: 'created', 'updated_in_place', 'restarted', 'confirmed_warning', 'noop'
+    """
+    existing = None
+    if pipedrive_activity_id:
+        existing = Shoot.objects.filter(pipedrive_activity_id=pipedrive_activity_id).first()
+
+    # Never seen → treat like create (e.g. activity type just changed to Shoot Booking)
+    if not existing:
+        shoot = handle_new_shoot(
+            pipedrive_deal_id=pipedrive_deal_id, pipedrive_activity_id=pipedrive_activity_id,
+            title=title, location=location,
+            shoot_datetime=shoot_datetime, duration_minutes=duration_minutes, notes=notes,
+            prefilled_lat=prefilled_lat, prefilled_lng=prefilled_lng, prefilled_state=prefilled_state,
+            location_city=location_city, location_street=location_street,
+        )
+        return shoot, "created"
+
+    # Detect material changes (location or datetime)
+    location_changed = (existing.location or "").strip() != (location or "").strip()
+    time_changed = existing.shoot_datetime != shoot_datetime
+
+    # Always patch shallow fields
+    existing.title = title or existing.title
+    existing.notes = notes
+    existing.duration_minutes = duration_minutes or existing.duration_minutes
+    if pipedrive_activity_id and not existing.pipedrive_activity_id:
+        existing.pipedrive_activity_id = pipedrive_activity_id
+
+    if existing.status in {"confirmed", "failed", "cancelled"}:
+        # Don't reshuffle; just update fields. If time/location changed, log a warning.
+        if location_changed or time_changed:
+            existing.location = location
+            existing.shoot_datetime = shoot_datetime
+            logger.warning(
+                "Shoot %s is %s but location/time changed in Pipedrive. "
+                "Manual follow-up may be needed (will be auto-handled once real calendar is wired).",
+                existing.id, existing.status,
+            )
+        existing.save()
+        return existing, "confirmed_warning" if (location_changed or time_changed) else "noop"
+
+    # Still pending - if nothing material changed, just save the patch and move on
+    if not (location_changed or time_changed):
+        existing.save()
+        return existing, "updated_in_place"
+
+    # Material change while pending → cancel pending invites + restart the ranking
+    logger.info(
+        "Shoot %s changed (location_changed=%s, time_changed=%s) while pending; restarting invite chain",
+        existing.id, location_changed, time_changed,
+    )
+
+    cal = get_client()
+    for inv in existing.invites.all():
+        if inv.status == "pending" and inv.google_event_id:
+            cal.cancel_event(inv.google_event_id)
+        if inv.status == "pending":
+            inv.status = "cancelled"
+            inv.save(update_fields=["status"])
+
+    # Update shoot with new info, redo geocoding + ranking (with fallback cascade)
+    if prefilled_lat is not None and prefilled_lng is not None:
+        lat, lng = prefilled_lat, prefilled_lng
+    else:
+        result = geocode_with_fallback(
+            _geocode_candidates(location, location_city, location_street, prefilled_state)
+        )
+        if not result:
+            existing.status = "failed"
+            existing.save()
+            return existing, "noop"
+        (lat, lng), _used = result
+    state = prefilled_state or _state_from_location(location)
+
+    existing.location = location
+    existing.lat = lat
+    existing.lng = lng
+    existing.shoot_datetime = shoot_datetime
+    existing.status = "pending"
+    existing.save()
+
+    ranked = rank_for_shoot(lat, lng, shoot_state=state)
+    if not ranked:
+        existing.status = "failed"
+        existing.save(update_fields=["status"])
+        return existing, "noop"
+
+    cfg = SchedulingSettings.get()
+    expires = timezone.now() + timedelta(hours=cfg.escalation_hours)
+
+    # Wipe and recreate the invite chain so ranks reflect the new location
+    existing.invites.exclude(status__in=["accepted"]).delete()
+    for rank, scored in enumerate(ranked):
+        Invite.objects.create(
+            shoot=existing, videographer=scored.videographer, rank=rank,
+            score=scored.score, drive_miles=scored.drive_miles,
+            drive_minutes=scored.drive_minutes, status="pending",
+            expires_at=expires if rank == 0 else timezone.now(),
+        )
+
+    _send_invite(existing, rank=0)
+    return existing, "restarted"
+
+
+def handle_deleted_shoot(pipedrive_activity_id: str | None = None,
+                         pipedrive_deal_id: str | None = None) -> Shoot | None:
+    """
+    Pipedrive activity 'delete' event. Cancel all pending invites + mark shoot cancelled.
+    Look up by activity_id (primary), fall back to deal_id only if needed.
+    """
+    shoot = None
+    if pipedrive_activity_id:
+        shoot = Shoot.objects.filter(pipedrive_activity_id=pipedrive_activity_id).first()
+    if not shoot and pipedrive_deal_id:
+        shoot = Shoot.objects.filter(pipedrive_deal_id=pipedrive_deal_id).first()
+    if not shoot:
+        logger.info("Delete webhook for unknown shoot (activity=%s deal=%s), ignoring",
+                    pipedrive_activity_id, pipedrive_deal_id)
+        return None
+
+    cal = get_client()
+    cancelled_count = 0
+    for inv in shoot.invites.filter(status="pending"):
+        if inv.google_event_id:
+            cal.cancel_event(inv.google_event_id)
+        inv.status = "cancelled"
+        inv.save(update_fields=["status"])
+        cancelled_count += 1
+
+    if shoot.status != "confirmed":
+        shoot.status = "cancelled"
+        shoot.save(update_fields=["status"])
+    logger.info("Shoot %s deleted in Pipedrive; cancelled %d pending invites", shoot.id, cancelled_count)
+    return shoot
+
+
+def _geocode_candidates(location: str, city: str | None, street: str | None, state: str | None) -> list[str]:
+    """Build a cascade: full address → street+city+state → city+state. Skips empties + dupes."""
+    candidates = [location]
+    if street and city and state:
+        candidates.append(f"{street}, {city}, {state}")
+    elif street and city:
+        candidates.append(f"{street}, {city}")
+    if city and state:
+        candidates.append(f"{city}, {state}")
+    elif city:
+        candidates.append(city)
+    return candidates
+
+
+def handle_new_shoot(
+    *,
+    pipedrive_deal_id: str,
+    pipedrive_activity_id: str | None = None,
+    title: str,
+    location: str,
+    shoot_datetime: datetime,
+    duration_minutes: int = 120,
+    notes: str = "",
+    prefilled_lat: float | None = None,
+    prefilled_lng: float | None = None,
+    prefilled_state: str | None = None,
+    location_city: str | None = None,
+    location_street: str | None = None,
+) -> Shoot:
+    """
+    Called by the Pipedrive webhook. Idempotent on pipedrive_activity_id
+    (each Pipedrive activity = one shoot; a single deal can have multiple shoots).
+    """
+    # Dedupe by activity_id — the actual unique key
+    if pipedrive_activity_id:
+        existing = Shoot.objects.filter(pipedrive_activity_id=pipedrive_activity_id).first()
+        if existing:
+            logger.info("Shoot for activity %s already exists (id=%s), skipping",
+                        pipedrive_activity_id, existing.id)
+            return existing
+
+    # Coords: prefer Pipedrive's lat/lng, then cascade geocode (full -> street+city -> city+state)
+    if prefilled_lat is not None and prefilled_lng is not None:
+        lat, lng = prefilled_lat, prefilled_lng
+        logger.info("Using Pipedrive-provided coords for %r: (%s, %s)", location, lat, lng)
+    else:
+        candidates = _geocode_candidates(location, location_city, location_street, prefilled_state)
+        result = geocode_with_fallback(candidates)
+        if not result:
+            logger.error("Could not geocode any candidate for shoot: %s (tried %s)", location, candidates)
+            shoot = Shoot.objects.create(
+                pipedrive_deal_id=pipedrive_deal_id, pipedrive_activity_id=pipedrive_activity_id,
+                title=title, location=location,
+                shoot_datetime=shoot_datetime, duration_minutes=duration_minutes,
+                notes=notes, status="failed",
+            )
+            return shoot
+        (lat, lng), used = result
+        if used != location:
+            logger.warning("Couldn't geocode %r directly; fell back to %r", location, used)
+
+    # State: prefer Pipedrive's structured admin_area_level_1, fall back to text parsing
+    state = prefilled_state or _state_from_location(location)
+
+    shoot = Shoot.objects.create(
+        pipedrive_deal_id=pipedrive_deal_id, pipedrive_activity_id=pipedrive_activity_id,
+        title=title, location=location,
+        lat=lat, lng=lng, shoot_datetime=shoot_datetime, duration_minutes=duration_minutes,
+        notes=notes, status="pending",
+    )
+
+    # Rank
+    ranked = rank_for_shoot(lat, lng, shoot_state=state)
+    if not ranked:
+        logger.warning("No eligible videographers for shoot %s", shoot.id)
+        shoot.status = "failed"
+        shoot.save(update_fields=["status"])
+        notify.shoot_failed(shoot)
+        return shoot
+
+    # Save all invites as records (rank 0..N) but only send to #0
+    cfg = SchedulingSettings.get()
+    expires = timezone.now() + timedelta(hours=cfg.escalation_hours)
+    for rank, scored in enumerate(ranked):
+        Invite.objects.create(
+            shoot=shoot, videographer=scored.videographer, rank=rank,
+            score=scored.score, drive_miles=scored.drive_miles,
+            drive_minutes=scored.drive_minutes, status="pending",
+            expires_at=expires if rank == 0 else timezone.now(),
+        )
+
+    _send_invite(shoot, rank=0)
+    return shoot
+
+
+def _send_invite(shoot: Shoot, rank: int) -> Invite | None:
+    """Send the calendar invite to the videographer at this rank."""
+    invite = shoot.invites.filter(rank=rank).first()
+    if not invite:
+        return None
+
+    cal = get_client()
+    end = shoot.shoot_datetime + timedelta(minutes=shoot.duration_minutes)
+    event_id = cal.create_event(
+        summary=f"Hockey shoot - {shoot.title or shoot.location}",
+        description=_invite_message(shoot, invite.videographer, invite.drive_miles or 0, invite.drive_minutes or 0),
+        location=shoot.location,
+        start=shoot.shoot_datetime,
+        end=end,
+        attendee_email=invite.videographer.email,
+    )
+
+    cfg = SchedulingSettings.get()
+    invite.google_event_id = event_id
+    invite.expires_at = timezone.now() + timedelta(hours=cfg.escalation_hours)
+    invite.save(update_fields=["google_event_id", "expires_at"])
+
+    # Schedule the escalation check
+    from .jobs import schedule_escalation_check
+    schedule_escalation_check(invite.id)
+
+    logger.info("Invite sent to %s for shoot %s (rank %d, event %s)",
+                invite.videographer.name, shoot.id, rank, event_id)
+    return invite
+
+
+def check_and_escalate(invite_id: int) -> None:
+    """
+    Runs when an invite's 24h window expires. If still pending, mark
+    expired and send to the next rank.
+    """
+    try:
+        invite = Invite.objects.get(id=invite_id)
+    except Invite.DoesNotExist:
+        return
+
+    cal = get_client()
+    status = cal.get_attendee_status(invite.google_event_id, invite.videographer.email)
+    logger.info("Escalation check: invite %s, attendee status=%s", invite.id, status)
+
+    if status == "accepted":
+        _mark_accepted(invite)
+        return
+
+    # Otherwise expire + escalate
+    invite.status = "declined" if status == "declined" else "expired"
+    invite.responded_at = timezone.now()
+    invite.save(update_fields=["status", "responded_at"])
+    if invite.google_event_id:
+        cal.cancel_event(invite.google_event_id)
+
+    next_invite = invite.shoot.invites.filter(rank=invite.rank + 1).first()
+    if next_invite:
+        _send_invite(invite.shoot, rank=invite.rank + 1)
+    else:
+        invite.shoot.status = "failed"
+        invite.shoot.save(update_fields=["status"])
+        logger.warning("Exhausted all videographers for shoot %s", invite.shoot.id)
+        notify.shoot_failed(invite.shoot)
+
+
+def poll_all_pending_invites() -> None:
+    """
+    Runs every few minutes. Looks at:
+      - PENDING invites (videographer hasn't responded yet)
+      - ACCEPTED invites for shoots that haven't started yet (in case they flip to decline)
+
+    For pending invites:
+      accepted   -> confirm the shoot, cancel other invites
+      declined   -> mark declined, escalate to next rank immediately
+      needsAction-> nothing (wait for 24h timer)
+
+    For accepted invites (already-confirmed shoots in the future):
+      accepted   -> nothing (still good)
+      declined   -> reset shoot to pending, recover the next available videographer
+      needsAction-> nothing (treat as still accepted until they explicitly decline)
+    """
+    now = timezone.now()
+    # Anything we still care about: pending OR accepted, and shoot hasn't started
+    invites = (Invite.objects
+               .filter(status__in=["pending", "accepted"],
+                       shoot__shoot_datetime__gte=now)
+               .exclude(google_event_id="")
+               .select_related("shoot", "videographer"))
+    if not invites.exists():
+        return
+
+    cal = get_client()
+    for invite in invites:
+        try:
+            status = cal.get_attendee_status(invite.google_event_id, invite.videographer.email)
+        except Exception as e:
+            logger.exception("poll: failed to read status for invite %s: %s", invite.id, e)
+            continue
+
+        # --- Pending invite paths ---
+        if invite.status == "pending":
+            if status == "accepted":
+                logger.info("poll: invite %s ACCEPTED by %s", invite.id, invite.videographer.email)
+                _mark_accepted(invite)
+            elif status == "declined":
+                logger.info("poll: invite %s DECLINED by %s, escalating", invite.id, invite.videographer.email)
+                _decline_and_escalate(invite, cal)
+
+        # --- Accepted invite paths (watch for reversals) ---
+        elif invite.status == "accepted":
+            if status == "declined":
+                logger.warning(
+                    "poll: previously-accepted invite %s now DECLINED by %s; reopening shoot",
+                    invite.id, invite.videographer.email,
+                )
+                _handle_post_acceptance_decline(invite, cal)
+
+
+def _decline_and_escalate(invite: Invite, cal) -> None:
+    """Mark invite declined, cancel its calendar event, send to the next available person."""
+    invite.status = "declined"
+    invite.responded_at = timezone.now()
+    invite.save(update_fields=["status", "responded_at"])
+    if invite.google_event_id:
+        cal.cancel_event(invite.google_event_id)
+
+    next_invite = _next_available_invite(invite.shoot, after_rank=invite.rank)
+    if next_invite:
+        _send_invite(invite.shoot, rank=next_invite.rank)
+    else:
+        invite.shoot.status = "failed"
+        invite.shoot.save(update_fields=["status"])
+        logger.warning("poll: exhausted all videographers for shoot %s", invite.shoot.id)
+        notify.shoot_failed(invite.shoot)
+
+
+def _handle_post_acceptance_decline(invite: Invite, cal) -> None:
+    """
+    Someone accepted then changed their mind. Roll back the shoot to 'pending'
+    and find the next available person. Previously-cancelled people are
+    eligible again because their cancellation only happened because we thought
+    we had someone.
+    """
+    invite.status = "declined"
+    invite.responded_at = timezone.now()
+    invite.save(update_fields=["status", "responded_at"])
+
+    shoot = invite.shoot
+    shoot.status = "pending"
+    shoot.confirmed_videographer = None
+    shoot.save(update_fields=["status", "confirmed_videographer"])
+
+    # Find the next person to ask: prefer ranks AFTER the one who just bailed,
+    # falling back to the cancelled folks (they never actually got asked).
+    next_invite = _next_available_invite(shoot, after_rank=invite.rank)
+    if next_invite:
+        _send_invite(shoot, rank=next_invite.rank)
+    else:
+        shoot.status = "failed"
+        shoot.save(update_fields=["status"])
+        logger.warning("post-acceptance decline: no fallback available for shoot %s", shoot.id)
+        notify.shoot_failed(shoot)
+
+
+def _next_available_invite(shoot: Shoot, after_rank: int) -> Invite | None:
+    """
+    Find the lowest-rank invite that hasn't already declined / accepted-and-bailed.
+    Looks at ranks > after_rank first, then wraps to cancelled invites at any rank
+    that weren't already explicitly declined.
+    """
+    # First: try the next rank in the chain
+    n = shoot.invites.filter(rank__gt=after_rank).order_by("rank").first()
+    if n and n.status in {"pending", "cancelled"}:
+        return n
+    # Otherwise: re-offer to anyone we previously cancelled (they never got asked)
+    return (shoot.invites
+            .filter(status="cancelled")
+            .exclude(rank=after_rank)
+            .order_by("rank")
+            .first())
+
+
+def _mark_accepted(invite: Invite) -> None:
+    invite.status = "accepted"
+    invite.responded_at = timezone.now()
+    invite.save(update_fields=["status", "responded_at"])
+
+    invite.shoot.status = "confirmed"
+    invite.shoot.confirmed_videographer = invite.videographer
+    invite.shoot.save(update_fields=["status", "confirmed_videographer"])
+
+    # Cancel any other pending invites for this shoot
+    other_pending = invite.shoot.invites.filter(status="pending").exclude(id=invite.id)
+    cal = get_client()
+    for other in other_pending:
+        if other.google_event_id:
+            cal.cancel_event(other.google_event_id)
+        other.status = "cancelled"
+        other.save(update_fields=["status"])
+
+    logger.info("Shoot %s confirmed with %s", invite.shoot.id, invite.videographer.name)
+    # TODO: notify owner

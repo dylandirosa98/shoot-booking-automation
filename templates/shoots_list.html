@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}All Shoots · Shoot Scheduler{% endblock %}
+
+{% block content %}
+<div class="mb-6 flex justify-between items-center">
+    <div>
+        <h1 class="text-3xl font-bold mb-1">Shoots</h1>
+        <p class="text-slate-500 text-sm">Full history — upcoming, past, and everything in between.</p>
+    </div>
+    <a href="/" class="text-sm text-blue-600 hover:text-blue-700">← Dashboard</a>
+</div>
+
+<!-- Filter tabs -->
+<div class="bg-white rounded-xl shadow-sm border border-slate-100 mb-6">
+    <div class="flex flex-wrap gap-1 p-2 text-sm">
+        {% for key, label, count in tabs %}
+        <a href="?filter={{ key }}"
+           class="px-3 py-2 rounded-md font-medium
+                  {% if filter_key == key %}bg-slate-900 text-white
+                  {% else %}text-slate-600 hover:bg-slate-100{% endif %}">
+            {{ label }} <span class="ml-1 text-xs opacity-70">{{ count }}</span>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Shoots table -->
+<div class="bg-white rounded-xl shadow-sm border border-slate-100">
+    {% if shoots %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="text-xs uppercase tracking-wide text-slate-500 bg-slate-50">
+                <tr>
+                    <th class="px-6 py-3 text-left">Shoot</th>
+                    <th class="px-6 py-3 text-left">Booked</th>
+                    <th class="px-6 py-3 text-left">Shoot Date</th>
+                    <th class="px-6 py-3 text-left">Location</th>
+                    <th class="px-6 py-3 text-left">Status</th>
+                    <th class="px-6 py-3 text-left">Videographer</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+                {% for shoot in shoots %}
+                <tr class="hover:bg-slate-50 cursor-pointer align-top"
+                    onclick="if(!event.target.closest('details')) window.location='{% url 'shoot_detail' shoot.id %}'">
+                    <td class="px-6 py-3 font-medium">{{ shoot.title|default:"Untitled" }}</td>
+                    <td class="px-6 py-3 text-xs text-slate-500">
+                        <div>{{ shoot.created_at|date:"M j, Y" }}</div>
+                        <div class="text-slate-400">{{ shoot.created_at|date:"g:i A" }}</div>
+                    </td>
+                    <td class="px-6 py-3 text-sm">
+                        <div class="font-medium">{{ shoot.shoot_datetime|date:"M j, Y" }}</div>
+                        <div class="text-xs text-slate-500">{{ shoot.shoot_datetime|date:"g:i A" }}</div>
+                    </td>
+                    <td class="px-6 py-3 text-sm text-slate-600">{{ shoot.location }}</td>
+                    <td class="px-6 py-3">
+                        {% if shoot.status == "confirmed" %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-medium">Confirmed</span>
+                        {% elif shoot.status == "pending" %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-amber-100 text-amber-700 text-xs font-medium">Pending</span>
+                        {% elif shoot.status == "failed" %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-rose-100 text-rose-700 text-xs font-medium">Failed</span>
+                        {% elif shoot.status == "cancelled" %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-slate-200 text-slate-600 text-xs font-medium">Cancelled</span>
+                        {% else %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-slate-100 text-slate-600 text-xs font-medium">{{ shoot.get_status_display }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-6 py-3 text-sm text-slate-600">
+                        {% if shoot.confirmed_videographer %}
+                            <div class="font-medium text-emerald-700">{{ shoot.confirmed_videographer.name }}</div>
+                        {% elif shoot.current_invitee %}
+                            <div class="font-medium text-slate-700">{{ shoot.current_invitee.videographer.name }}</div>
+                            <div class="text-xs text-slate-400">#{{ shoot.current_invitee.rank|add:1 }} · awaiting reply</div>
+                        {% else %}
+                            <span class="text-slate-400">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="text-center py-12 text-slate-500">
+        <div class="text-4xl mb-2">📭</div>
+        <p>No shoots in this view.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

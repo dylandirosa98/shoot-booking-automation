@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}{{ shoot.title|default:"Shoot" }} · Detail{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+    <a href="/" class="text-sm text-blue-600 hover:text-blue-700">← Back to dashboard</a>
+</div>
+
+<!-- Shoot Header -->
+<div class="bg-white rounded-xl shadow-sm border border-slate-100 p-6 mb-6">
+    <div class="flex justify-between items-start mb-4">
+        <div>
+            <h1 class="text-2xl font-bold mb-1">{{ shoot.title|default:"Untitled Shoot" }}</h1>
+            <div class="text-slate-500 text-sm">Pipedrive deal: <span class="font-mono">{{ shoot.pipedrive_deal_id|default:"—" }}</span></div>
+        </div>
+        <div>
+            {% if shoot.status == "confirmed" %}
+                <span class="inline-block px-3 py-1 rounded-md bg-emerald-100 text-emerald-700 text-sm font-semibold">✓ Confirmed</span>
+            {% elif shoot.status == "pending" %}
+                <span class="inline-block px-3 py-1 rounded-md bg-amber-100 text-amber-700 text-sm font-semibold">⏳ Pending</span>
+            {% elif shoot.status == "failed" %}
+                <span class="inline-block px-3 py-1 rounded-md bg-rose-100 text-rose-700 text-sm font-semibold">✗ Failed — no one accepted</span>
+            {% else %}
+                <span class="inline-block px-3 py-1 rounded-md bg-slate-100 text-slate-600 text-sm font-semibold">{{ shoot.get_status_display }}</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+        <div>
+            <div class="text-xs uppercase text-slate-500 mb-1">Shoot Date</div>
+            <div class="font-medium">{{ shoot.shoot_datetime|date:"D, M j Y" }}</div>
+            <div class="text-slate-500">{{ shoot.shoot_datetime|date:"g:i A" }}</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase text-slate-500 mb-1">Duration</div>
+            <div class="font-medium">{{ shoot.duration_minutes }} min</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase text-slate-500 mb-1">Booked At</div>
+            <div class="font-medium">{{ shoot.created_at|date:"M j Y" }}</div>
+            <div class="text-slate-500">{{ shoot.created_at|date:"g:i A" }}</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase text-slate-500 mb-1">Location</div>
+            <div class="font-medium">{{ shoot.location }}</div>
+            {% if shoot.lat %}<div class="text-xs text-slate-400">{{ shoot.lat|floatformat:4 }}, {{ shoot.lng|floatformat:4 }}</div>{% endif %}
+        </div>
+    </div>
+    {% if shoot.notes %}
+    <div class="mt-4 pt-4 border-t border-slate-100">
+        <div class="text-xs uppercase text-slate-500 mb-1">Notes</div>
+        <div class="text-sm text-slate-700">{{ shoot.notes }}</div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Invite Chain -->
+<div class="bg-white rounded-xl shadow-sm border border-slate-100">
+    <div class="px-6 py-4 border-b border-slate-100">
+        <h2 class="text-lg font-semibold">Videographer Invite Chain</h2>
+        <p class="text-xs text-slate-500 mt-1">Top of the list is the highest-scored. Invites are sent one at a time; we escalate when the current one expires.</p>
+    </div>
+    <div class="divide-y divide-slate-100">
+        {% for invite in invites %}
+        <div class="px-6 py-4 flex items-center gap-4
+            {% if invite.status == 'accepted' %}bg-emerald-50/50
+            {% elif invite.status == 'pending' and invite.google_event_id %}bg-amber-50/40
+            {% endif %}">
+            <div class="text-xs font-bold w-8 text-slate-400 shrink-0">#{{ invite.rank|add:1 }}</div>
+            <div class="flex-1">
+                <div class="flex items-center gap-2">
+                    <div class="font-medium">{{ invite.videographer.name }}</div>
+                    <div class="text-xs px-1.5 py-0.5 rounded
+                        {% if invite.videographer.rating >= 4.5 %}bg-emerald-100 text-emerald-700
+                        {% elif invite.videographer.rating >= 4.0 %}bg-blue-100 text-blue-700
+                        {% elif invite.videographer.rating >= 3.5 %}bg-amber-100 text-amber-700
+                        {% else %}bg-slate-100 text-slate-600{% endif %}">{{ invite.videographer.rating }}★</div>
+                </div>
+                <div class="text-xs text-slate-500 mt-0.5">
+                    {{ invite.videographer.city }}, {{ invite.videographer.state }} ·
+                    {% if invite.drive_minutes %}~{{ invite.drive_miles|floatformat:0 }} mi / {{ invite.drive_minutes|floatformat:0 }} min ·{% endif %}
+                    score {{ invite.score|floatformat:3 }}
+                </div>
+            </div>
+            <div class="text-right shrink-0">
+                {% if invite.status == "accepted" %}
+                    <span class="inline-block px-2 py-1 rounded bg-emerald-100 text-emerald-700 text-xs font-semibold">✓ Accepted</span>
+                    <div class="text-[11px] text-slate-400 mt-1">
+                        sent {{ invite.sent_at|date:"M j g:i A" }}<br>
+                        accepted {{ invite.responded_at|date:"M j g:i A" }}
+                    </div>
+                {% elif invite.status == "declined" %}
+                    <span class="inline-block px-2 py-1 rounded bg-rose-100 text-rose-700 text-xs">✗ Declined</span>
+                    <div class="text-[11px] text-slate-400 mt-1">
+                        sent {{ invite.sent_at|date:"M j g:i A" }}<br>
+                        declined {{ invite.responded_at|date:"M j g:i A" }}
+                    </div>
+                {% elif invite.status == "expired" %}
+                    <span class="inline-block px-2 py-1 rounded bg-slate-200 text-slate-600 text-xs">Expired</span>
+                    <div class="text-[11px] text-slate-400 mt-1">
+                        sent {{ invite.sent_at|date:"M j g:i A" }}<br>
+                        expired {{ invite.responded_at|date:"M j g:i A" }}
+                    </div>
+                {% elif invite.status == "cancelled" %}
+                    <span class="inline-block px-2 py-1 rounded bg-slate-100 text-slate-500 text-xs">Cancelled</span>
+                    <div class="text-[11px] text-slate-400 mt-1">sent {{ invite.sent_at|date:"M j g:i A" }}</div>
+                {% elif invite.status == "pending" and invite.google_event_id %}
+                    <span class="inline-block px-2 py-1 rounded bg-amber-100 text-amber-700 text-xs font-semibold">⏳ Awaiting reply</span>
+                    <div class="text-[11px] text-slate-400 mt-1">
+                        sent {{ invite.sent_at|date:"M j g:i A" }}<br>
+                        expires {{ invite.expires_at|date:"M j g:i A" }}
+                    </div>
+                {% else %}
+                    <span class="inline-block px-2 py-1 rounded bg-slate-100 text-slate-500 text-xs">Queued</span>
+                {% endif %}
+
+                {% if invite.status == "pending" and invite.google_event_id %}
+                <div class="mt-2 flex gap-2 justify-end">
+                    <form method="post" action="{% url 'simulate_accept' invite.id %}">
+                        {% csrf_token %}
+                        <button class="text-xs px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-medium">
+                            Test: Accept
+                        </button>
+                    </form>
+                    <form method="post" action="{% url 'simulate_escalate' invite.id %}">
+                        {% csrf_token %}
+                        <button class="text-xs px-2 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white font-medium">
+                            Test: Decline / Escalate
+                        </button>
+                    </form>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
