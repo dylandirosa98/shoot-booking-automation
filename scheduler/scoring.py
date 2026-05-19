@@ -9,9 +9,38 @@ Filters applied:
     - Only same-state (configurable via same_state_only kwarg)
     - Drop anyone over MAX_DRIVE_MINUTES from the shoot
 """
+import logging
 from dataclasses import dataclass
 from .models import Videographer, SchedulingSettings
 from .distance import estimate_drive
+from .geocode import geocode_with_fallback
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_coords(v: Videographer) -> bool:
+    """If a videographer is missing coords, try to geocode them on the spot.
+    Returns True if coords are available afterward."""
+    if v.lat is not None and v.lng is not None:
+        return True
+    candidates = []
+    if v.address:
+        candidates.append(v.address)
+    if v.city and v.state:
+        candidates.append(f"{v.city}, {v.state}")
+    elif v.city:
+        candidates.append(v.city)
+    if not candidates:
+        return False
+    result = geocode_with_fallback(candidates)
+    if not result:
+        logger.warning("Runtime geocode failed for %s (tried %s)", v.name, candidates)
+        return False
+    (lat, lng), used = result
+    v.lat, v.lng = lat, lng
+    v.save(update_fields=["lat", "lng"])
+    logger.info("Runtime-geocoded %s -> (%s, %s) via %r", v.name, lat, lng, used)
+    return True
 
 
 @dataclass
@@ -43,6 +72,10 @@ def rank_for_shoot(
     max_min = cfg.max_drive_minutes
     if same_state_only is None:
         same_state_only = cfg.same_state_only
+
+    # Try to backfill coords for any active videographer missing them
+    for v in Videographer.objects.filter(active=True).filter(lat__isnull=True):
+        _ensure_coords(v)
 
     qs = Videographer.objects.filter(active=True, lat__isnull=False, lng__isnull=False)
     if same_state_only and shoot_state:

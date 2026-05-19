@@ -26,6 +26,16 @@ class Command(BaseCommand):
         self.stdout.write("Seeding videographers...")
         call_command("seed_videographers")
 
+        # 1b. Backfill coords for any active videographer missing lat/lng
+        from scheduler.models import Videographer
+        from scheduler.scoring import _ensure_coords
+        missing = Videographer.objects.filter(active=True).filter(lat__isnull=True)
+        if missing.exists():
+            self.stdout.write(f"Backfilling coords for {missing.count()} videographer(s)...")
+            for v in missing:
+                ok = _ensure_coords(v)
+                self.stdout.write(f"  {'OK' if ok else 'FAIL'}: {v.name} ({v.city}, {v.state})")
+
         # 2. Ensure superuser exists
         username = os.getenv("BOOTSTRAP_ADMIN_USERNAME", "info@puckpromedia.com")
         email    = os.getenv("BOOTSTRAP_ADMIN_EMAIL",    "info@puckpromedia.com")

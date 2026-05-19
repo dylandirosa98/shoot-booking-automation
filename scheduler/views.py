@@ -286,13 +286,15 @@ def _parse_activity(payload: dict) -> dict | None:
         location_str = raw_loc
 
     # --- datetime: due_date + due_time. Time can be string OR {'value': 'HH:MM:SS'} ---
+    # Pipedrive sends due_time in UTC (regardless of user's local timezone).
     due_date = data.get("due_date") or ""
     due_time_str = _parse_hhmm(_extract_value(data.get("due_time")))
     shoot_dt = None
     if due_date:
+        from datetime import timezone as _tz
         shoot_dt = parse_datetime(f"{due_date}T{due_time_str}:00")
         if shoot_dt and timezone.is_naive(shoot_dt):
-            shoot_dt = timezone.make_aware(shoot_dt)
+            shoot_dt = timezone.make_aware(shoot_dt, _tz.utc)
 
     # --- duration: also may be {'value': 'HH:MM:SS'} ---
     duration_minutes = _parse_duration_minutes(_extract_value(data.get("duration")))
