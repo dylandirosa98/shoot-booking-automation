@@ -73,10 +73,6 @@ def rank_for_shoot(
     if same_state_only is None:
         same_state_only = cfg.same_state_only
 
-    # Try to backfill coords for any active videographer missing them
-    for v in Videographer.objects.filter(active=True).filter(lat__isnull=True):
-        _ensure_coords(v)
-
     qs = Videographer.objects.filter(active=True, lat__isnull=False, lng__isnull=False)
     if same_state_only and shoot_state:
         qs = qs.filter(state=shoot_state)

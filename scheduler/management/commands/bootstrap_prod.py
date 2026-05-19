@@ -23,25 +23,15 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         from scheduler.models import Videographer
-        from scheduler.scoring import _ensure_coords
 
         # Seed videographers ONLY if the table is empty. After first deploy,
-        # the user's edits in admin are the source of truth and we never touch
-        # existing rows.
+        # the admin is the source of truth and we never touch existing rows.
         if Videographer.objects.count() == 0:
             self.stdout.write("Videographer table is empty — running one-time seed...")
             call_command("seed_videographers")
         else:
             self.stdout.write(f"Videographers already exist ({Videographer.objects.count()}), "
-                              "skipping seed (your edits are preserved).")
-
-        # Backfill coords for any active videographer missing lat/lng (lat/lng only)
-        missing = Videographer.objects.filter(active=True).filter(lat__isnull=True)
-        if missing.exists():
-            self.stdout.write(f"Backfilling coords for {missing.count()} videographer(s)...")
-            for v in missing:
-                ok = _ensure_coords(v)
-                self.stdout.write(f"  {'OK' if ok else 'FAIL'}: {v.name} ({v.city}, {v.state})")
+                              "skipping seed (admin edits are preserved).")
 
         # 2. Ensure superuser exists
         username = os.getenv("BOOTSTRAP_ADMIN_USERNAME", "info@puckpromedia.com")

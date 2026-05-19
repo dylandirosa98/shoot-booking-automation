@@ -1,3 +1,4 @@
+from django import forms
 from django.contrib import admin
 from .models import Videographer, Shoot, Invite, SchedulingSettings
 
@@ -18,12 +19,34 @@ class SchedulingSettingsAdmin(admin.ModelAdmin):
         return redirect(f"./{obj.pk}/change/")
 
 
+class VideographerAdminForm(forms.ModelForm):
+    class Meta:
+        model = Videographer
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["lat"].required = True
+        self.fields["lng"].required = True
+        self.fields["lat"].help_text = (
+            "Required. Get coords from "
+            "<a href='https://www.latlong.net/' target='_blank'>latlong.net</a> "
+            "or right-click a location in Google Maps."
+        )
+        self.fields["lng"].help_text = "Required."
+
+
 @admin.register(Videographer)
 class VideographerAdmin(admin.ModelAdmin):
-    list_display = ("name", "state", "city", "rating", "active", "email")
+    form = VideographerAdminForm
+    list_display = ("name", "state", "city", "rating", "active", "has_coords", "email")
     list_filter = ("state", "active")
     search_fields = ("name", "email", "city")
     list_editable = ("active", "rating")
+
+    @admin.display(boolean=True, description="Coords?")
+    def has_coords(self, obj):
+        return obj.lat is not None and obj.lng is not None
 
 
 class InviteInline(admin.TabularInline):
