@@ -22,11 +22,12 @@ class Command(BaseCommand):
     help = "Idempotent first-time bootstrap for a fresh deployment"
 
     def handle(self, *args, **opts):
-        # 1. Seed videographers (idempotent — update_or_create)
-        self.stdout.write("Seeding videographers...")
-        call_command("seed_videographers")
+        # NOTE: We intentionally do NOT seed videographers here. Seeding ran
+        # once on the first deploy and overwrote nothing thereafter. If you
+        # truly need to re-seed (e.g., wiped DB), run manually:
+        #   railway run python manage.py seed_videographers
 
-        # 1b. Backfill coords for any active videographer missing lat/lng
+        # Backfill coords for any active videographer missing lat/lng
         from scheduler.models import Videographer
         from scheduler.scoring import _ensure_coords
         missing = Videographer.objects.filter(active=True).filter(lat__isnull=True)
