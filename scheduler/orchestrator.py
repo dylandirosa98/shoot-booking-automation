@@ -11,6 +11,7 @@ Flow:
     7. When 24h job fires: check acceptance, escalate if needed
 """
 import logging
+import re
 from datetime import datetime, timedelta
 from django.utils import timezone
 from .models import Videographer, Shoot, Invite, SchedulingSettings
@@ -207,6 +208,19 @@ def handle_deleted_shoot(pipedrive_activity_id: str | None = None,
     return shoot
 
 
+_CITY_STATE_RE = re.compile(r",\s*([A-Za-z][A-Za-z .'\-]+?),\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?(?:,\s*USA)?\s*$")
+
+
+def _parse_city_state(location: str) -> tuple[str, str] | None:
+    """Pull trailing 'City, ST' out of a Pipedrive-formatted address string."""
+    if not location:
+        return None
+    m = _CITY_STATE_RE.search(location.strip())
+    if not m:
+        return None
+    return m.group(1).strip(), m.group(2).upper()
+
+
 def _geocode_candidates(location: str, city: str | None, street: str | None, state: str | None) -> list[str]:
     """Build a cascade: full address → street+city+state → city+state. Skips empties + dupes."""
     candidates = [location]
@@ -218,7 +232,24 @@ def _geocode_candidates(location: str, city: str | None, street: str | None, sta
         candidates.append(f"{city}, {state}")
     elif city:
         candidates.append(city)
-    return candidates
+
+    # Last-resort fallback: when Pipedrive doesn't send structured city/state,
+    # parse the trailing "City, ST" out of the raw location string. Prefer the
+    # caller-supplied state if it disagrees — it's more authoritative.
+    parsed = _parse_city_state(location)
+    if parsed:
+        parsed_city, parsed_state = parsed
+        final_state = state or parsed_state
+        candidates.append(f"{parsed_city}, {final_state}")
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for c in candidates:
+        key = c.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    return deduped
 
 
 def handle_new_shoot(
