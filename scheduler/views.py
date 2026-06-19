@@ -9,11 +9,12 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
-from .models import Videographer, Shoot, Invite, SchedulingSettings
+from .models import Editor, EditJob, Videographer, Shoot, Invite, SchedulingSettings
 from .orchestrator import (
     handle_new_shoot, handle_updated_shoot, handle_deleted_shoot,
     check_and_escalate, _mark_accepted,
 )
+from .editing import handle_deleted_edit_job, handle_new_edit_job, handle_updated_edit_job
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,32 @@ def dashboard(request):
     return render(request, "dashboard.html", {
         "by_state": by_state,
         "shoots": shoots,
+        "stats": stats,
+    })
+
+
+def edits_dashboard(request):
+    editors = (Editor.objects
+               .all()
+               .prefetch_related("edit_jobs", "video_type_ranks")
+               .order_by("name"))
+    jobs = (EditJob.objects
+            .select_related("assigned_editor")
+            .exclude(status="cancelled")
+            .order_by("due_datetime"))
+
+    for editor in editors:
+        editor.active_job_count = editor.edit_jobs.filter(status__in=EditJob.ACTIVE_STATUSES).count()
+
+    stats = {
+        "editors_total": Editor.objects.count(),
+        "editors_active": Editor.objects.filter(active=True).count(),
+        "edit_jobs_open": EditJob.objects.filter(status__in=EditJob.ACTIVE_STATUSES).count(),
+        "edit_jobs_failed": EditJob.objects.filter(status="failed").count(),
+    }
+    return render(request, "edits_dashboard.html", {
+        "editors": editors,
+        "jobs": jobs[:50],
         "stats": stats,
     })
 
@@ -299,7 +326,7 @@ def _parse_activity(payload: dict) -> dict | None:
     # --- duration: also may be {'value': 'HH:MM:SS'} ---
     duration_minutes = _parse_duration_minutes(_extract_value(data.get("duration")))
 
-    if not (location_str and shoot_dt):
+    if not shoot_dt:
         return None
 
     # Skip already-completed activities (e.g., webhook fires on backfill/edit)
@@ -314,7 +341,7 @@ def _parse_activity(payload: dict) -> dict | None:
         "type": type_name,
         "pipedrive_deal_id": str(deal_id) if deal_id else None,
         "pipedrive_activity_id": str(activity_id),
-        "title": subject or f"Shoot @ {location_str}",
+        "title": subject or (f"Shoot @ {location_str}" if location_str else f"Activity {activity_id}"),
         "location": location_str,
         "location_lat": location_lat,
         "location_lng": location_lng,
@@ -324,6 +351,46 @@ def _parse_activity(payload: dict) -> dict | None:
         "shoot_datetime": shoot_dt,
         "duration_minutes": duration_minutes,
         "notes": note,
+    }
+
+
+EDIT_ACTIVITY_TYPE_TO_VIDEO_TYPE = {
+    "recruiting highlight video": "Recruiting",
+    "hype video": "Hype",
+    "highlight recap": "Highlight",
+}
+
+
+def _detect_edit_video_type(parsed: dict) -> str:
+    return EDIT_ACTIVITY_TYPE_TO_VIDEO_TYPE.get(_normalize_type(parsed.get("type") or ""), "Unspecified")
+
+
+def _activity_type_matches(raw_filter: str, activity_type: str) -> bool:
+    filters = [_normalize_type(item) for item in (raw_filter or "").split(",") if item.strip()]
+    if not filters:
+        return False
+    normalized_activity_type = _normalize_type(activity_type)
+    return normalized_activity_type in filters
+
+
+def _activity_matches_edit(parsed: dict, cfg: SchedulingSettings) -> bool:
+    if not _activity_type_matches(cfg.edit_activity_type_filter, parsed["type"]):
+        return False
+    subject_filter = (cfg.edit_subject_filter or "").strip().lower()
+    if subject_filter and subject_filter not in (parsed.get("title") or "").lower():
+        return False
+    return True
+
+
+def _edit_kwargs(parsed: dict) -> dict:
+    return {
+        "pipedrive_deal_id": parsed["pipedrive_deal_id"],
+        "pipedrive_activity_id": parsed.get("pipedrive_activity_id"),
+        "title": parsed["title"],
+        "video_type": _detect_edit_video_type(parsed),
+        "due_datetime": parsed["shoot_datetime"],
+        "duration_minutes": parsed.get("duration_minutes") or 0,
+        "notes": parsed["notes"],
     }
 
 
@@ -366,7 +433,10 @@ def pipedrive_webhook(request):
         shoot = handle_deleted_shoot(pipedrive_activity_id=activity_id, pipedrive_deal_id=deal_id)
         if shoot:
             return JsonResponse({"status": "ok", "action": "deleted", "shoot_id": shoot.id})
-        return JsonResponse({"status": "ignored", "reason": "no matching shoot to delete"})
+        edit_job = handle_deleted_edit_job(pipedrive_activity_id=activity_id, pipedrive_deal_id=deal_id)
+        if edit_job:
+            return JsonResponse({"status": "ok", "action": "deleted", "edit_job_id": edit_job.id})
+        return JsonResponse({"status": "ignored", "reason": "no matching shoot or edit job to delete"})
 
     # --- CREATE / CHANGE need full parsed payload ---
     if action not in {"create", "change"}:
@@ -380,20 +450,35 @@ def pipedrive_webhook(request):
     type_filter_normalized = _normalize_type(cfg.activity_type_filter)
     activity_type_normalized = _normalize_type(parsed["type"])
     type_matches = (not type_filter_normalized) or (type_filter_normalized in activity_type_normalized)
+    edit_matches = _activity_matches_edit(parsed, cfg)
+
+    if edit_matches:
+        kwargs = _edit_kwargs(parsed)
+        if action == "create":
+            edit_job = handle_new_edit_job(**kwargs)
+            return JsonResponse({"status": "ok", "action": "created", "edit_job_id": edit_job.id, "edit_job_status": edit_job.status})
+        edit_job, taken = handle_updated_edit_job(**kwargs)
+        return JsonResponse({"status": "ok", "action": taken, "edit_job_id": edit_job.id, "edit_job_status": edit_job.status})
 
     # Edge case: a 'change' event might be reporting that the type was changed AWAY
-    # from "Shoot Booking". If we have a tracked shoot but type no longer matches,
-    # treat it like a delete (cancel everything).
+    # from a tracked workflow. Cancel only records that already exist.
     if not type_matches:
         if action == "change":
             existing_shoot = handle_deleted_shoot(
                 pipedrive_activity_id=parsed.get("pipedrive_activity_id"),
-                pipedrive_deal_id=parsed.get("pipedrive_deal_id"),
             )
             if existing_shoot:
                 return JsonResponse({"status": "ok", "action": "cancelled_due_to_type_change", "shoot_id": existing_shoot.id})
-        logger.info("Pipedrive webhook: activity type %r doesn't match filter, ignoring", parsed["type"])
-        return JsonResponse({"status": "ignored", "reason": f"type {parsed['type']!r} doesn't match filter"})
+            existing_edit = handle_deleted_edit_job(
+                pipedrive_activity_id=parsed.get("pipedrive_activity_id"),
+            )
+            if existing_edit:
+                return JsonResponse({"status": "ok", "action": "cancelled_due_to_type_change", "edit_job_id": existing_edit.id})
+        logger.info("Pipedrive webhook: activity type %r doesn't match filters, ignoring", parsed["type"])
+        return JsonResponse({"status": "ignored", "reason": f"type {parsed['type']!r} doesn't match filters"})
+
+    if not parsed["location"]:
+        return JsonResponse({"status": "ignored", "reason": "shoot activity had no location"})
 
     kwargs = dict(
         pipedrive_deal_id=parsed["pipedrive_deal_id"],

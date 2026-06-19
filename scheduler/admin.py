@@ -1,6 +1,6 @@
 from django import forms
 from django.contrib import admin
-from .models import Videographer, Shoot, Invite, SchedulingSettings
+from .models import Editor, EditorVideoTypeRank, EditJob, Videographer, Shoot, Invite, SchedulingSettings
 
 
 @admin.register(SchedulingSettings)
@@ -53,6 +53,36 @@ class InviteInline(admin.TabularInline):
     model = Invite
     extra = 0
     readonly_fields = ("sent_at", "responded_at", "score", "drive_minutes", "drive_miles")
+
+
+class EditorVideoTypeRankInline(admin.TabularInline):
+    model = EditorVideoTypeRank
+    extra = 0
+
+
+@admin.register(Editor)
+class EditorAdmin(admin.ModelAdmin):
+    list_display = ("name", "max_active_jobs", "active", "clickup_user_id", "email")
+    list_filter = ("active",)
+    search_fields = ("name", "email", "clickup_user_id")
+    list_editable = ("active", "max_active_jobs")
+    inlines = [EditorVideoTypeRankInline]
+
+
+@admin.register(EditorVideoTypeRank)
+class EditorVideoTypeRankAdmin(admin.ModelAdmin):
+    list_display = ("video_type", "rank", "editor", "active")
+    list_filter = ("video_type", "active")
+    search_fields = ("editor__name", "editor__email")
+    list_editable = ("rank", "active")
+
+
+@admin.register(EditJob)
+class EditJobAdmin(admin.ModelAdmin):
+    list_display = ("title", "video_type", "due_datetime", "status", "assigned_editor", "clickup_task_id", "active_job_count_at_assignment")
+    list_filter = ("status", "assigned_editor")
+    search_fields = ("title", "pipedrive_deal_id", "pipedrive_activity_id", "assigned_editor__name")
+    readonly_fields = ("created_at", "updated_at", "active_job_count_at_assignment", "clickup_synced_at", "clickup_error")
 
 
 @admin.register(Shoot)

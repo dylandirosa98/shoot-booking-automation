@@ -41,6 +41,7 @@ See `.env.example` for the full list with comments. Summary:
 | `GOOGLE_CALENDAR_OWNER_EMAIL` | Your friend's company Google email | Yes |
 | `PIPEDRIVE_WEBHOOK_SECRET` | You make this up; configure in Pipedrive | Yes |
 | `PIPEDRIVE_API_TOKEN` | Pipedrive settings -> Personal Preferences -> API | Optional |
+| `CLICKUP_API_TOKEN` | ClickUp personal API token | Yes for edit task creation |
 | `ESCALATION_HOURS` | Default 24 | No |
 | `SCORE_PENALTY_PER_MINUTE` | Tuning knob, default 0.01 | No |
 | `MAX_DRIVE_MINUTES` | Hard cap, default 180 | No |
@@ -57,12 +58,18 @@ See `.env.example` for the full list with comments. Summary:
    (EXCEPT `DATABASE_URL` — Railway owns that).
    Important: set `DEBUG=False` and add your Railway URL to `ALLOWED_HOSTS`.
 5. Railway auto-detects Python via `requirements.txt`. Add a `Procfile` (already in repo).
-6. After first deploy, open Railway shell and run:
+6. Railway's start command already runs:
    ```
-   python manage.py migrate
+   python manage.py migrate --noinput
+   python manage.py collectstatic --noinput
+   python manage.py bootstrap_prod
+   ```
+   The edit-job migrations and one-time editor ranking seed run during `migrate`.
+7. If you still need an admin user, open Railway shell and run:
+   ```
    python manage.py createsuperuser
    ```
-7. Visit `https://<your-app>.railway.app/admin` and log in.
+8. Visit `https://<your-app>.railway.app/admin` and log in.
 
 ---
 
@@ -131,7 +138,27 @@ in the **Description** field. Anything typed in Notes will NOT reach the videogr
 
 ---
 
-## 7. Notes / Gotchas
+## 7. ClickUp edit tasks
+
+The edit automation listens for Pipedrive activities whose type is exactly one of:
+
+- `Recruiting Highlight Video`
+- `Hype Video`
+- `Highlight Recap`
+
+When one arrives, the app chooses an editor using the per-video-type ranking and
+that editor's `max_active_jobs` threshold. It then creates a ClickUp task in the
+Editing Projects list using:
+
+- Pipedrive activity subject -> ClickUp task title
+- Pipedrive due date -> ClickUp due date (date-only)
+- Pipedrive activity notes/description -> ClickUp description
+- selected editor's `clickup_user_id` -> ClickUp assignee
+
+A one-time migration seeds the initial editor rows, ClickUp user IDs, and rankings.
+Django records that migration, so it will not run again on later deploys.
+
+## 8. Notes / Gotchas
 
 - **Time zone**: Django is set to `America/New_York`. Change in `settings.py` if needed.
 - **Refresh tokens** can be invalidated if Google account password changes. Re-run section 5 if so.

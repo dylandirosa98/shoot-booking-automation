@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}Editor Dashboard · Shoot Scheduler{% endblock %}
+
+{% block content %}
+<div class="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+    <div>
+        <h1 class="text-3xl font-bold mb-1">Editor Dashboard</h1>
+        <p class="text-slate-500">Local edit job assignment from Pipedrive activities.</p>
+    </div>
+    <div class="inline-flex rounded-lg border border-slate-200 bg-white p-1 text-sm shadow-sm w-fit">
+        <a href="{% url 'dashboard' %}" class="px-3 py-1.5 rounded-md text-slate-600 hover:bg-slate-50">Videographers</a>
+        <a href="{% url 'edits_dashboard' %}" class="px-3 py-1.5 rounded-md bg-slate-900 text-white">Editors</a>
+    </div>
+</div>
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Editors</div>
+        <div class="text-3xl font-bold">{{ stats.editors_active }}</div>
+        <div class="text-xs text-slate-400 mt-1">of {{ stats.editors_total }} total</div>
+    </div>
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Open Edit Jobs</div>
+        <div class="text-3xl font-bold text-blue-600">{{ stats.edit_jobs_open }}</div>
+        <div class="text-xs text-slate-400 mt-1">counted as workload</div>
+    </div>
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Failed</div>
+        <div class="text-3xl font-bold text-rose-600">{{ stats.edit_jobs_failed }}</div>
+        <div class="text-xs text-slate-400 mt-1">no editor available</div>
+    </div>
+    <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Trigger</div>
+        <div class="text-xl font-bold">3 edit types</div>
+        <div class="text-xs text-slate-400 mt-1">Recruiting Highlight Video, Hype Video, Highlight Recap</div>
+    </div>
+</div>
+
+<div class="bg-white rounded-xl shadow-sm border border-slate-100 mb-10">
+    <div class="px-6 py-4 border-b border-slate-100">
+        <h2 class="text-lg font-semibold">Edit Jobs</h2>
+        <p class="text-xs text-slate-400 mt-0.5">Latest 50 non-cancelled jobs · sorted by due date</p>
+    </div>
+    {% if jobs %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="text-xs uppercase tracking-wide text-slate-500 bg-slate-50">
+                <tr>
+                    <th class="px-6 py-3 text-left">Job</th>
+                    <th class="px-6 py-3 text-left">Type</th>
+                    <th class="px-6 py-3 text-left">Due</th>
+                    <th class="px-6 py-3 text-left">Status</th>
+                    <th class="px-6 py-3 text-left">Editor</th>
+                    <th class="px-6 py-3 text-left">ClickUp</th>
+                    <th class="px-6 py-3 text-left">Selection</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+                {% for job in jobs %}
+                <tr class="align-top hover:bg-slate-50">
+                    <td class="px-6 py-3">
+                        <div class="font-medium">{{ job.title|default:"Untitled edit" }}</div>
+                        <div class="text-xs text-slate-400">Pipedrive activity {{ job.pipedrive_activity_id|default:"-" }}</div>
+                    </td>
+                    <td class="px-6 py-3 text-slate-600">{{ job.video_type|default:"Unspecified" }}</td>
+                    <td class="px-6 py-3 text-slate-700">
+                        <div class="font-medium">{{ job.due_datetime|date:"M j, Y" }}</div>
+                        <div class="text-xs text-slate-500">{{ job.due_datetime|date:"g:i A" }}</div>
+                    </td>
+                    <td class="px-6 py-3">
+                        {% if job.status == "failed" %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-rose-100 text-rose-700 text-xs font-medium">Failed</span>
+                        {% elif job.status == "updated" %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-blue-100 text-blue-700 text-xs font-medium">Updated</span>
+                        {% else %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-medium">Created</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-6 py-3 text-slate-600">
+                        {% if job.assigned_editor %}
+                            <div class="font-medium">{{ job.assigned_editor.name }}</div>
+                            <div class="text-xs text-slate-400">{{ job.active_job_count_at_assignment }} active at assignment</div>
+                        {% else %}
+                            <span class="text-slate-400">-</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-6 py-3 text-slate-600">
+                        {% if job.clickup_task_id %}
+                            <div class="font-medium text-emerald-700">Created</div>
+                            <div class="text-xs text-slate-400">{{ job.clickup_task_id }}</div>
+                        {% elif job.clickup_error %}
+                            <div class="font-medium text-rose-700">Failed</div>
+                            <div class="text-xs text-slate-400">{{ job.clickup_error|truncatechars:80 }}</div>
+                        {% else %}
+                            <span class="text-slate-400">-</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-6 py-3 text-slate-600">
+                        {% if job.selection_reason %}
+                        <details>
+                            <summary class="text-xs text-blue-600 hover:text-blue-700 cursor-pointer select-none">Why?</summary>
+                            <pre class="mt-2 whitespace-pre-wrap rounded-md bg-slate-50 p-2 text-[11px] leading-5 text-slate-600">{{ job.selection_reason }}</pre>
+                        </details>
+                        {% else %}
+                            <span class="text-slate-400">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="text-center py-12 text-slate-500">
+        <p>No edit jobs yet. Recruiting Highlight Video, Hype Video, and Highlight Recap activities will appear here.</p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="bg-white rounded-xl shadow-sm border border-slate-100">
+    <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+        <h2 class="text-lg font-semibold">Editor Roster</h2>
+        <a href="/admin/scheduler/editor/" class="text-xs text-blue-600 hover:text-blue-700 font-medium">Manage</a>
+    </div>
+    <div class="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {% for editor in editors %}
+        <div class="border border-slate-200 rounded-lg p-3 hover:border-slate-300 transition {% if not editor.active %}opacity-50{% endif %}">
+            <div class="flex justify-between items-start mb-1">
+                <div class="font-semibold text-sm">{{ editor.name }}</div>
+            </div>
+            <div class="text-xs text-slate-500">{{ editor.active_job_count }} / {{ editor.max_active_jobs }} active jobs</div>
+            <div class="text-xs text-slate-400 mt-1">ClickUp ID: {{ editor.clickup_user_id|default:"not set" }}</div>
+            <div class="mt-2 flex flex-wrap gap-1">
+                {% for ranking in editor.video_type_ranks.all %}
+                    {% if ranking.active %}
+                    <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600">{{ ranking.video_type }} #{{ ranking.rank }}</span>
+                    {% endif %}
+                {% endfor %}
+            </div>
+            <div class="text-xs text-slate-400 mt-1 truncate">{{ editor.email }}</div>
+        </div>
+        {% empty %}
+        <div class="text-sm text-slate-500">Add editors in Django admin to start assigning edit jobs.</div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

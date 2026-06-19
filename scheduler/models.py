@@ -30,6 +30,18 @@ class SchedulingSettings(models.Model):
         help_text="Only Pipedrive activities whose type name CONTAINS this string will trigger a booking. "
                   "Leave blank to trigger on all activities.",
     )
+    edit_activity_type_filter = models.CharField(
+        max_length=100,
+        default="Recruiting Highlight Video,Hype Video,Highlight Recap",
+        blank=True,
+        help_text="Comma-separated Pipedrive activity type names that trigger edit jobs.",
+    )
+    edit_subject_filter = models.CharField(
+        max_length=100,
+        default="",
+        blank=True,
+        help_text="Optional extra subject filter for edit jobs. Leave blank when using dedicated edit activity types.",
+    )
 
     class Meta:
         verbose_name = "Scheduling Settings"
@@ -70,6 +82,48 @@ class Videographer(models.Model):
         return f"{self.name} ({self.state} - {self.rating} stars)"
 
 
+VIDEO_TYPE_CHOICES = [
+    ("Highlight", "Highlight"),
+    ("Hype", "Hype"),
+    ("Recruiting", "Recruiting"),
+]
+
+
+class Editor(models.Model):
+    name = models.CharField(max_length=100)
+    email = models.EmailField()
+    clickup_user_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="ClickUp user ID used when assigning edit tasks.",
+    )
+    max_active_jobs = models.PositiveIntegerField(default=5)
+    active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class EditorVideoTypeRank(models.Model):
+    editor = models.ForeignKey(Editor, on_delete=models.CASCADE, related_name="video_type_ranks")
+    video_type = models.CharField(max_length=30, choices=VIDEO_TYPE_CHOICES)
+    rank = models.PositiveIntegerField(help_text="1 is the first choice for this video type.")
+    active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["video_type", "rank", "editor__name"]
+        unique_together = [("editor", "video_type"), ("video_type", "rank")]
+
+    def __str__(self):
+        return f"{self.video_type}: #{self.rank} {self.editor.name}"
+
+
 class Shoot(models.Model):
     STATUS_CHOICES = [
         ("pending", "Pending - looking for videographer"),
@@ -101,6 +155,48 @@ class Shoot(models.Model):
 
     def __str__(self):
         return f"{self.title or 'Shoot'} @ {self.location} ({self.shoot_datetime:%Y-%m-%d %H:%M})"
+
+
+class EditJob(models.Model):
+    STATUS_CHOICES = [
+        ("created", "Created"),
+        ("updated", "Updated"),
+        ("failed", "Failed - no editor available"),
+        ("clickup_failed", "Failed - ClickUp task not created"),
+        ("cancelled", "Cancelled"),
+    ]
+    ACTIVE_STATUSES = {"created", "updated"}
+
+    pipedrive_deal_id = models.CharField(max_length=50, db_index=True, null=True, blank=True)
+    pipedrive_activity_id = models.CharField(
+        max_length=50,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="Pipedrive activity id - the unique identifier for one edit job",
+    )
+    title = models.CharField(max_length=255, blank=True)
+    video_type = models.CharField(max_length=30, choices=VIDEO_TYPE_CHOICES, blank=True)
+    due_datetime = models.DateTimeField()
+    duration_minutes = models.IntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="created")
+    assigned_editor = models.ForeignKey(
+        Editor, null=True, blank=True, on_delete=models.SET_NULL, related_name="edit_jobs"
+    )
+    clickup_task_id = models.CharField(max_length=80, blank=True)
+    clickup_error = models.TextField(blank=True)
+    clickup_synced_at = models.DateTimeField(null=True, blank=True)
+    active_job_count_at_assignment = models.PositiveIntegerField(default=0)
+    selection_reason = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["due_datetime"]
+
+    def __str__(self):
+        return f"{self.title or 'Edit'} ({self.due_datetime:%Y-%m-%d %H:%M})"
 
 
 class Invite(models.Model):

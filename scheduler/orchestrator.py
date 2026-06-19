@@ -41,7 +41,6 @@ def _invite_message(shoot: Shoot, videographer: Videographer, miles: float, minu
         f"Hi {first_name},",
         "You're our top pick for an upcoming hockey shoot. Details:",
         (f"  Location: {shoot.location}\n"
-         f"  When:     {shoot.shoot_datetime:%A, %B %-d at %-I:%M %p}\n"
          f"  Distance: ~{miles:.0f} mi (~{minutes:.0f} min drive)"),
     ]
     if shoot.notes and shoot.notes.strip():
