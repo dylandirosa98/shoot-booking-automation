@@ -278,14 +278,9 @@ def _parse_activity(payload: dict) -> dict | None:
 
     type_name = data.get("type") or data.get("type_name") or ""
     subject   = data.get("subject") or ""
-    # Pipedrive activities can carry BOTH a private 'note' and a 'public_description'.
-    # Combine them so the videographer sees everything the friend wrote.
-    note_parts = []
-    if data.get("note"):
-        note_parts.append(_strip_html(data["note"]).strip())
-    if data.get("public_description"):
-        note_parts.append(_strip_html(data["public_description"]).strip())
-    note = "\n\n".join(p for p in note_parts if p)
+    # For edit jobs, use the activity Notes field only. Pipedrive's
+    # Description field is separate and should not be copied to ClickUp.
+    note = _strip_html(data.get("note") or "").strip()
     deal_id   = data.get("deal_id")
     activity_id = data.get("id")
 

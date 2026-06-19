@@ -22,6 +22,8 @@ def activity_payload(*, action="create", activity_id="act-1", deal_id="deal-1", 
             "due_time": "15:30:00",
             "duration": "01:00:00",
             "note": "<p>Edit notes</p>",
+            "description": "<p>Do not copy this description</p>",
+            "public_description": "<p>Do not copy this public description</p>",
             "done": False,
         },
     }
@@ -90,6 +92,7 @@ class EditorSelectionTests(TestCase):
         self.assertEqual(fake_clickup.job.due_datetime, job.due_datetime)
         self.assertEqual(fake_clickup.job.title, "Test highlight edit")
         self.assertEqual(fake_clickup.job.notes, "Edit notes")
+        self.assertNotIn("Do not copy", fake_clickup.job.notes)
         self.assertEqual(fake_clickup.job.video_type, "Highlight")
 
     def test_edit_activity_type_maps_video_types(self):
