@@ -35,6 +35,13 @@ class FakeCalendarClient:
     def cancel_event(self, event_id: str) -> None:
         logger.info("[FAKE CAL] CANCEL event %s", event_id)
 
+    def replace_event_attendee(self, *, event_id: str, description: str, attendee_email: str) -> str:
+        logger.info(
+            "[FAKE CAL] REPLACE attendee on event %s with %s desc=%s",
+            event_id, attendee_email, description[:120],
+        )
+        return event_id
+
     def get_attendee_status(self, event_id: str, attendee_email: str) -> str:
         """Always 'needsAction' so escalation fires. Monkey-patch in tests."""
         return "needsAction"
@@ -90,6 +97,21 @@ class GoogleCalendarClient:
             logger.info("[GOOGLE CAL] cancelled event %s", event_id)
         except Exception as e:
             logger.exception("[GOOGLE CAL] failed to cancel event %s: %s", event_id, e)
+
+    def replace_event_attendee(self, *, event_id: str, description: str, attendee_email: str) -> str:
+        body = {
+            "description": description,
+            "attendees": [{"email": attendee_email}],
+            "guestsCanModify": False,
+        }
+        event = self.service.events().patch(
+            calendarId="primary",
+            eventId=event_id,
+            body=body,
+            sendUpdates="all",
+        ).execute()
+        logger.info("[GOOGLE CAL] replaced attendee on event %s with %s", event_id, attendee_email)
+        return event.get("id", event_id)
 
     def get_attendee_status(self, event_id: str, attendee_email: str) -> str:
         """Returns 'accepted' | 'declined' | 'tentative' | 'needsAction'."""

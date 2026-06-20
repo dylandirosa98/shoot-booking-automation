@@ -332,22 +332,30 @@ def handle_new_shoot(
     return shoot
 
 
-def _send_invite(shoot: Shoot, rank: int) -> Invite | None:
+def _send_invite(shoot: Shoot, rank: int, reuse_event_id: str | None = None) -> Invite | None:
     """Send the calendar invite to the videographer at this rank."""
     invite = shoot.invites.filter(rank=rank).first()
     if not invite:
         return None
 
     cal = get_client()
-    end = shoot.shoot_datetime + timedelta(minutes=shoot.duration_minutes)
-    event_id = cal.create_event(
-        summary=f"Hockey shoot - {shoot.title or shoot.location}",
-        description=_invite_message(shoot, invite.videographer, invite.drive_miles or 0, invite.drive_minutes or 0),
-        location=shoot.location,
-        start=shoot.shoot_datetime,
-        end=end,
-        attendee_email=invite.videographer.email,
-    )
+    description = _invite_message(shoot, invite.videographer, invite.drive_miles or 0, invite.drive_minutes or 0)
+    if reuse_event_id:
+        event_id = cal.replace_event_attendee(
+            event_id=reuse_event_id,
+            description=description,
+            attendee_email=invite.videographer.email,
+        )
+    else:
+        end = shoot.shoot_datetime + timedelta(minutes=shoot.duration_minutes)
+        event_id = cal.create_event(
+            summary=f"Hockey shoot - {shoot.title or shoot.location}",
+            description=description,
+            location=shoot.location,
+            start=shoot.shoot_datetime,
+            end=end,
+            attendee_email=invite.videographer.email,
+        )
 
     cfg = SchedulingSettings.get()
     invite.google_event_id = event_id
@@ -369,8 +377,12 @@ def check_and_escalate(invite_id: int) -> None:
     expired and send to the next rank.
     """
     try:
-        invite = Invite.objects.get(id=invite_id)
+        invite = Invite.objects.select_related("shoot", "videographer").get(id=invite_id)
     except Invite.DoesNotExist:
+        return
+
+    if invite.status != "pending":
+        logger.info("Escalation check: invite %s is %s, skipping", invite.id, invite.status)
         return
 
     cal = get_client()
@@ -381,21 +393,8 @@ def check_and_escalate(invite_id: int) -> None:
         _mark_accepted(invite)
         return
 
-    # Otherwise expire + escalate
-    invite.status = "declined" if status == "declined" else "expired"
-    invite.responded_at = timezone.now()
-    invite.save(update_fields=["status", "responded_at"])
-    if invite.google_event_id:
-        cal.cancel_event(invite.google_event_id)
-
-    next_invite = invite.shoot.invites.filter(rank=invite.rank + 1).first()
-    if next_invite:
-        _send_invite(invite.shoot, rank=invite.rank + 1)
-    else:
-        invite.shoot.status = "failed"
-        invite.shoot.save(update_fields=["status"])
-        logger.warning("Exhausted all videographers for shoot %s", invite.shoot.id)
-        notify.shoot_failed(invite.shoot)
+    # Otherwise expire + move the same calendar event to the next videographer.
+    _move_event_to_next_invite(invite, cal, "declined" if status == "declined" else "expired")
 
 
 def poll_all_pending_invites() -> None:
@@ -452,21 +451,26 @@ def poll_all_pending_invites() -> None:
 
 
 def _decline_and_escalate(invite: Invite, cal) -> None:
-    """Mark invite declined, cancel its calendar event, send to the next available person."""
-    invite.status = "declined"
+    """Mark invite declined and move the same calendar event to the next available person."""
+    _move_event_to_next_invite(invite, cal, "declined")
+
+
+def _move_event_to_next_invite(invite: Invite, cal, final_status: str) -> Invite | None:
+    invite.status = final_status
     invite.responded_at = timezone.now()
     invite.save(update_fields=["status", "responded_at"])
-    if invite.google_event_id:
-        cal.cancel_event(invite.google_event_id)
 
     next_invite = _next_available_invite(invite.shoot, after_rank=invite.rank)
     if next_invite:
-        _send_invite(invite.shoot, rank=next_invite.rank)
-    else:
-        invite.shoot.status = "failed"
-        invite.shoot.save(update_fields=["status"])
-        logger.warning("poll: exhausted all videographers for shoot %s", invite.shoot.id)
-        notify.shoot_failed(invite.shoot)
+        return _send_invite(invite.shoot, rank=next_invite.rank, reuse_event_id=invite.google_event_id)
+
+    if invite.google_event_id:
+        cal.cancel_event(invite.google_event_id)
+    invite.shoot.status = "failed"
+    invite.shoot.save(update_fields=["status"])
+    logger.warning("exhausted all videographers for shoot %s", invite.shoot.id)
+    notify.shoot_failed(invite.shoot)
+    return None
 
 
 def _handle_post_acceptance_decline(invite: Invite, cal) -> None:
@@ -485,12 +489,13 @@ def _handle_post_acceptance_decline(invite: Invite, cal) -> None:
     shoot.confirmed_videographer = None
     shoot.save(update_fields=["status", "confirmed_videographer"])
 
-    # Find the next person to ask: prefer ranks AFTER the one who just bailed,
-    # falling back to the cancelled folks (they never actually got asked).
+    # Find the next person to ask and move the same calendar event forward.
     next_invite = _next_available_invite(shoot, after_rank=invite.rank)
     if next_invite:
-        _send_invite(shoot, rank=next_invite.rank)
+        _send_invite(shoot, rank=next_invite.rank, reuse_event_id=invite.google_event_id)
     else:
+        if invite.google_event_id:
+            cal.cancel_event(invite.google_event_id)
         shoot.status = "failed"
         shoot.save(update_fields=["status"])
         logger.warning("post-acceptance decline: no fallback available for shoot %s", shoot.id)

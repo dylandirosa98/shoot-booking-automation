@@ -7,7 +7,8 @@ from django.utils import timezone
 
 from .clickup_client import ClickUpTaskResult
 from .editing import rank_editors
-from .models import Editor, EditorVideoTypeRank, EditJob, SchedulingSettings, Shoot
+from .models import Editor, EditorVideoTypeRank, EditJob, Invite, SchedulingSettings, Shoot, Videographer
+from .orchestrator import check_and_escalate, poll_all_pending_invites
 
 
 def activity_payload(*, action="create", activity_id="act-1", deal_id="deal-1", type_name="Highlight Recap", subject="Test highlight edit"):
@@ -179,3 +180,131 @@ class EditorSelectionTests(TestCase):
         shoot.refresh_from_db()
         self.assertEqual(shoot.status, "pending")
         self.assertEqual(EditJob.objects.count(), 0)
+
+
+class VideographerEscalationTests(TestCase):
+    def setUp(self):
+        cfg = SchedulingSettings.get()
+        cfg.escalation_hours = 24
+        cfg.save()
+
+    def _shoot_with_invites(self):
+        first = Videographer.objects.create(
+            name="First Video", email="first@example.com", state="MI", rating=5.0, active=True,
+        )
+        second = Videographer.objects.create(
+            name="Second Video", email="second@example.com", state="MI", rating=4.8, active=True,
+        )
+        shoot = Shoot.objects.create(
+            pipedrive_deal_id="deal-shoot",
+            pipedrive_activity_id="shoot-activity",
+            title="Test Shoot",
+            location="Detroit, MI",
+            shoot_datetime=timezone.now() + timedelta(days=5),
+            duration_minutes=120,
+            status="pending",
+        )
+        first_invite = Invite.objects.create(
+            shoot=shoot,
+            videographer=first,
+            rank=0,
+            score=10,
+            drive_miles=5,
+            drive_minutes=10,
+            status="pending",
+            google_event_id="event-123",
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        second_invite = Invite.objects.create(
+            shoot=shoot,
+            videographer=second,
+            rank=1,
+            score=9,
+            drive_miles=6,
+            drive_minutes=12,
+            status="pending",
+            expires_at=timezone.now(),
+        )
+        return shoot, first_invite, second_invite
+
+    def test_escalation_skips_invite_that_is_already_accepted(self):
+        _, first_invite, second_invite = self._shoot_with_invites()
+        first_invite.status = "accepted"
+        first_invite.save(update_fields=["status"])
+
+        class FakeCalendar:
+            def __init__(self):
+                self.status_checked = False
+
+            def get_attendee_status(self, event_id, attendee_email):
+                self.status_checked = True
+                return "needsAction"
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            check_and_escalate(first_invite.id)
+
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        self.assertEqual(first_invite.status, "accepted")
+        self.assertEqual(second_invite.google_event_id, "")
+        self.assertFalse(fake_calendar.status_checked)
+
+    def test_escalation_reuses_calendar_event_for_next_videographer(self):
+        _, first_invite, second_invite = self._shoot_with_invites()
+
+        class FakeCalendar:
+            def __init__(self):
+                self.replacements = []
+                self.cancelled = []
+
+            def get_attendee_status(self, event_id, attendee_email):
+                return "needsAction"
+
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.replacements.append((event_id, attendee_email, description))
+                return event_id
+
+            def cancel_event(self, event_id):
+                self.cancelled.append(event_id)
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                check_and_escalate(first_invite.id)
+
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        self.assertEqual(first_invite.status, "expired")
+        self.assertEqual(second_invite.google_event_id, "event-123")
+        self.assertEqual(fake_calendar.replacements[0][0], "event-123")
+        self.assertEqual(fake_calendar.replacements[0][1], "second@example.com")
+        self.assertEqual(fake_calendar.cancelled, [])
+
+    def test_decline_poll_reuses_calendar_event_for_next_videographer(self):
+        _, first_invite, second_invite = self._shoot_with_invites()
+
+        class FakeCalendar:
+            def __init__(self):
+                self.replacements = []
+
+            def get_attendee_status(self, event_id, attendee_email):
+                return "declined"
+
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.replacements.append((event_id, attendee_email))
+                return event_id
+
+            def cancel_event(self, event_id):
+                raise AssertionError("Decline should reuse the event when another videographer is available")
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                poll_all_pending_invites()
+
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(second_invite.google_event_id, "event-123")
+        self.assertEqual(fake_calendar.replacements, [("event-123", "second@example.com")])
