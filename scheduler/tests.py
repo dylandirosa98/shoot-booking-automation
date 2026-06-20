@@ -95,6 +95,33 @@ class EditorSelectionTests(TestCase):
         self.assertNotIn("Do not copy", fake_clickup.job.notes)
         self.assertEqual(fake_clickup.job.video_type, "Highlight")
 
+    def test_edit_activity_fetches_activity_note_when_webhook_note_is_empty(self):
+        editor = Editor.objects.create(name="Editor One", email="editor@example.com", max_active_jobs=5, clickup_user_id=12345)
+        EditorVideoTypeRank.objects.create(editor=editor, video_type="Highlight", rank=1)
+
+        payload = activity_payload()
+        payload["data"]["note"] = ""
+
+        class FakeClickUp:
+            def create_edit_task(self, job):
+                self.job = job
+                return ClickUpTaskResult(task_id="clickup-123")
+
+        fake_clickup = FakeClickUp()
+        with patch("scheduler.views.get_activity_note", return_value="<p>Fetched Pipedrive activity note</p>") as note_fetch:
+            with patch("scheduler.editing.get_clickup_client", return_value=fake_clickup):
+                response = Client().post(
+                    "/webhook/pipedrive/",
+                    data=json.dumps(payload),
+                    content_type="application/json",
+                )
+
+        self.assertEqual(response.status_code, 200)
+        note_fetch.assert_called_once_with("act-1")
+        job = EditJob.objects.get(pipedrive_activity_id="act-1")
+        self.assertEqual(job.notes, "Fetched Pipedrive activity note")
+        self.assertEqual(fake_clickup.job.notes, "Fetched Pipedrive activity note")
+
     def test_edit_activity_type_maps_video_types(self):
         cases = [
             ("Highlight Recap", "Highlight"),

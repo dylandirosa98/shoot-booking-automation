@@ -15,6 +15,7 @@ from .orchestrator import (
     check_and_escalate, _mark_accepted,
 )
 from .editing import handle_deleted_edit_job, handle_new_edit_job, handle_updated_edit_job
+from .pipedrive_client import get_activity_note
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +379,10 @@ def _activity_matches_edit(parsed: dict, cfg: SchedulingSettings) -> bool:
 
 
 def _edit_kwargs(parsed: dict) -> dict:
+    notes = parsed["notes"]
+    if not notes and parsed.get("pipedrive_activity_id"):
+        notes = _strip_html(get_activity_note(parsed["pipedrive_activity_id"])).strip()
+
     return {
         "pipedrive_deal_id": parsed["pipedrive_deal_id"],
         "pipedrive_activity_id": parsed.get("pipedrive_activity_id"),
@@ -385,7 +390,7 @@ def _edit_kwargs(parsed: dict) -> dict:
         "video_type": _detect_edit_video_type(parsed),
         "due_datetime": parsed["shoot_datetime"],
         "duration_minutes": parsed.get("duration_minutes") or 0,
-        "notes": parsed["notes"],
+        "notes": notes,
     }
 
 

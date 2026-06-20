@@ -40,7 +40,7 @@ See `.env.example` for the full list with comments. Summary:
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | Generated locally one time (see section 5) | Yes |
 | `GOOGLE_CALENDAR_OWNER_EMAIL` | Your friend's company Google email | Yes |
 | `PIPEDRIVE_WEBHOOK_SECRET` | You make this up; configure in Pipedrive | Yes |
-| `PIPEDRIVE_API_TOKEN` | Pipedrive settings -> Personal Preferences -> API | Optional |
+| `PIPEDRIVE_API_TOKEN` | Pipedrive settings -> Personal Preferences -> API | Yes for edit activity notes |
 | `CLICKUP_API_TOKEN` | ClickUp personal API token | Yes for edit task creation |
 | `ESCALATION_HOURS` | Default 24 | No |
 | `SCORE_PENALTY_PER_MINUTE` | Tuning knob, default 0.01 | No |
