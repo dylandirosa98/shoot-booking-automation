@@ -40,7 +40,7 @@ See `.env.example` for the full list with comments. Summary:
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | Generated locally one time (see section 5) | Yes |
 | `GOOGLE_CALENDAR_OWNER_EMAIL` | Your friend's company Google email | Yes |
 | `PIPEDRIVE_WEBHOOK_SECRET` | You make this up; configure in Pipedrive | Yes |
-| `PIPEDRIVE_API_TOKEN` | Pipedrive settings -> Personal Preferences -> API | Yes for edit activity notes |
+| `PIPEDRIVE_API_TOKEN` | Pipedrive settings -> Personal Preferences -> API | Optional |
 | `CLICKUP_API_TOKEN` | ClickUp personal API token | Yes for edit task creation |
 | `ESCALATION_HOURS` | Default 24 | No |
 | `SCORE_PENALTY_PER_MINUTE` | Tuning knob, default 0.01 | No |
@@ -134,7 +134,7 @@ text areas: "Notes" and "Description". **Only Description is sent in v2 webhooks
 Always put shoot info (special requests, equipment, contact details, etc.)
 in the **Description** field. Anything typed in Notes will NOT reach the videographer.
 
-(If we ever need both, we can fetch via Pipedrive API — see PIPEDRIVE_API_TOKEN.)
+For v2 activity webhooks, Pipedrive sends this as `public_description`.
 
 ---
 
@@ -152,7 +152,7 @@ Editing Projects list using:
 
 - Pipedrive activity subject -> ClickUp task title
 - Pipedrive due date -> ClickUp due date (date-only)
-- Pipedrive activity notes/description -> ClickUp description
+- Pipedrive activity Description -> ClickUp description
 - selected editor's `clickup_user_id` -> ClickUp assignee
 
 A one-time migration seeds the initial editor rows, ClickUp user IDs, and rankings.

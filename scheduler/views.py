@@ -15,7 +15,6 @@ from .orchestrator import (
     check_and_escalate, _mark_accepted,
 )
 from .editing import handle_deleted_edit_job, handle_new_edit_job, handle_updated_edit_job
-from .pipedrive_client import get_activity_note
 
 logger = logging.getLogger(__name__)
 
@@ -279,9 +278,11 @@ def _parse_activity(payload: dict) -> dict | None:
 
     type_name = data.get("type") or data.get("type_name") or ""
     subject   = data.get("subject") or ""
-    # For edit jobs, use the activity Notes field only. Pipedrive's
-    # Description field is separate and should not be copied to ClickUp.
-    note = _strip_html(data.get("note") or "").strip()
+    # Pipedrive v2 sends the activity Description field as public_description.
+    # Keep note/description fallbacks for older webhook shapes.
+    note = _strip_html(
+        data.get("public_description") or data.get("note") or data.get("description") or ""
+    ).strip()
     deal_id   = data.get("deal_id")
     activity_id = data.get("id")
 
@@ -309,15 +310,23 @@ def _parse_activity(payload: dict) -> dict | None:
         location_str = raw_loc
 
     # --- datetime: due_date + due_time. Time can be string OR {'value': 'HH:MM:SS'} ---
-    # Pipedrive sends due_time in UTC (regardless of user's local timezone).
+    # When Pipedrive sends a real due_time, it is UTC. Date-only activities either
+    # omit due_time or send 00:00:00, so keep those on the configured local date.
     due_date = data.get("due_date") or ""
-    due_time_str = _parse_hhmm(_extract_value(data.get("due_time")))
+    raw_due_time = _extract_value(data.get("due_time"))
+    due_time_str = _parse_hhmm(raw_due_time)
+    is_date_only = not raw_due_time or due_time_str == "00:00"
     shoot_dt = None
     if due_date:
-        from datetime import timezone as _tz
-        shoot_dt = parse_datetime(f"{due_date}T{due_time_str}:00")
-        if shoot_dt and timezone.is_naive(shoot_dt):
-            shoot_dt = timezone.make_aware(shoot_dt, _tz.utc)
+        if is_date_only:
+            shoot_dt = parse_datetime(f"{due_date}T00:00:00")
+            if shoot_dt and timezone.is_naive(shoot_dt):
+                shoot_dt = timezone.make_aware(shoot_dt, timezone.get_current_timezone())
+        else:
+            from datetime import timezone as _tz
+            shoot_dt = parse_datetime(f"{due_date}T{due_time_str}:00")
+            if shoot_dt and timezone.is_naive(shoot_dt):
+                shoot_dt = timezone.make_aware(shoot_dt, _tz.utc)
 
     # --- duration: also may be {'value': 'HH:MM:SS'} ---
     duration_minutes = _parse_duration_minutes(_extract_value(data.get("duration")))
@@ -379,10 +388,6 @@ def _activity_matches_edit(parsed: dict, cfg: SchedulingSettings) -> bool:
 
 
 def _edit_kwargs(parsed: dict) -> dict:
-    notes = parsed["notes"]
-    if not notes and parsed.get("pipedrive_activity_id"):
-        notes = _strip_html(get_activity_note(parsed["pipedrive_activity_id"])).strip()
-
     return {
         "pipedrive_deal_id": parsed["pipedrive_deal_id"],
         "pipedrive_activity_id": parsed.get("pipedrive_activity_id"),
@@ -390,7 +395,7 @@ def _edit_kwargs(parsed: dict) -> dict:
         "video_type": _detect_edit_video_type(parsed),
         "due_datetime": parsed["shoot_datetime"],
         "duration_minutes": parsed.get("duration_minutes") or 0,
-        "notes": notes,
+        "notes": parsed["notes"],
     }
 
 

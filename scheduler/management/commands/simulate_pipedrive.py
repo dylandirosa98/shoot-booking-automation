@@ -54,7 +54,7 @@ class Command(BaseCommand):
                     "location": loc_obj,
                     "due_date": when.strftime("%Y-%m-%d"),
                     "due_time": when.strftime("%H:%M"),
-                    "note": opts["notes"],
+                    "public_description": opts["notes"],
                 },
                 "previous": None,
             }
@@ -71,7 +71,7 @@ class Command(BaseCommand):
                     "location": opts["location"],
                     "due_date": when.strftime("%Y-%m-%d"),
                     "due_time": when.strftime("%H:%M"),
-                    "note": opts["notes"],
+                    "public_description": opts["notes"],
                 },
             }
 

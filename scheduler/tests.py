@@ -21,9 +21,9 @@ def activity_payload(*, action="create", activity_id="act-1", deal_id="deal-1", 
             "due_date": "2026-07-01",
             "due_time": "15:30:00",
             "duration": "01:00:00",
-            "note": "<p>Edit notes</p>",
-            "description": "<p>Do not copy this description</p>",
-            "public_description": "<p>Do not copy this public description</p>",
+            "note": "<p>Fallback note</p>",
+            "description": "<p>Fallback description</p>",
+            "public_description": "<p>Edit description</p>",
             "done": False,
         },
     }
@@ -91,16 +91,16 @@ class EditorSelectionTests(TestCase):
         self.assertEqual(job.clickup_task_id, "clickup-123")
         self.assertEqual(fake_clickup.job.due_datetime, job.due_datetime)
         self.assertEqual(fake_clickup.job.title, "Test highlight edit")
-        self.assertEqual(fake_clickup.job.notes, "Edit notes")
-        self.assertNotIn("Do not copy", fake_clickup.job.notes)
+        self.assertEqual(fake_clickup.job.notes, "Edit description")
         self.assertEqual(fake_clickup.job.video_type, "Highlight")
 
-    def test_edit_activity_fetches_activity_note_when_webhook_note_is_empty(self):
+    def test_date_only_activity_keeps_due_date_on_local_day(self):
         editor = Editor.objects.create(name="Editor One", email="editor@example.com", max_active_jobs=5, clickup_user_id=12345)
         EditorVideoTypeRank.objects.create(editor=editor, video_type="Highlight", rank=1)
 
         payload = activity_payload()
-        payload["data"]["note"] = ""
+        payload["data"]["due_date"] = "2026-06-22"
+        payload["data"]["due_time"] = None
 
         class FakeClickUp:
             def create_edit_task(self, job):
@@ -108,19 +108,17 @@ class EditorSelectionTests(TestCase):
                 return ClickUpTaskResult(task_id="clickup-123")
 
         fake_clickup = FakeClickUp()
-        with patch("scheduler.views.get_activity_note", return_value="<p>Fetched Pipedrive activity note</p>") as note_fetch:
-            with patch("scheduler.editing.get_clickup_client", return_value=fake_clickup):
-                response = Client().post(
-                    "/webhook/pipedrive/",
-                    data=json.dumps(payload),
-                    content_type="application/json",
-                )
+        with patch("scheduler.editing.get_clickup_client", return_value=fake_clickup):
+            response = Client().post(
+                "/webhook/pipedrive/",
+                data=json.dumps(payload),
+                content_type="application/json",
+            )
 
         self.assertEqual(response.status_code, 200)
-        note_fetch.assert_called_once_with("act-1")
         job = EditJob.objects.get(pipedrive_activity_id="act-1")
-        self.assertEqual(job.notes, "Fetched Pipedrive activity note")
-        self.assertEqual(fake_clickup.job.notes, "Fetched Pipedrive activity note")
+        self.assertEqual(timezone.localtime(job.due_datetime).date().isoformat(), "2026-06-22")
+        self.assertEqual(timezone.localtime(fake_clickup.job.due_datetime).date().isoformat(), "2026-06-22")
 
     def test_edit_activity_type_maps_video_types(self):
         cases = [
