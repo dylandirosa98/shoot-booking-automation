@@ -10,7 +10,7 @@ a Google Maps API key configured yet:
     python manage.py geocode_videographers
 """
 from django.core.management.base import BaseCommand
-from scheduler.models import Videographer
+from scheduler.models import Videographer, VideographerServiceState
 
 
 # Format: (name, city, state, rating, phone, email, lat, lng)
@@ -81,6 +81,7 @@ class Command(BaseCommand):
                     "active": True,
                 },
             )
+            VideographerServiceState.objects.get_or_create(videographer=obj, state=state)
             if created:
                 added += 1
                 self.stdout.write(f"  + {name} ({state})")

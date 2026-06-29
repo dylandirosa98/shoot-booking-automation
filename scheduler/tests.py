@@ -7,8 +7,9 @@ from django.utils import timezone
 
 from .clickup_client import ClickUpTaskResult
 from .editing import rank_editors
-from .models import Editor, EditorVideoTypeRank, EditJob, Invite, SchedulingSettings, Shoot, Videographer
+from .models import Editor, EditorVideoTypeRank, EditJob, Invite, SchedulingSettings, Shoot, Videographer, VideographerServiceState
 from .orchestrator import check_and_escalate, poll_all_pending_invites
+from .scoring import rank_for_shoot
 
 
 def activity_payload(*, action="create", activity_id="act-1", deal_id="deal-1", type_name="Highlight Recap", subject="Test highlight edit"):
@@ -180,6 +181,54 @@ class EditorSelectionTests(TestCase):
         shoot.refresh_from_db()
         self.assertEqual(shoot.status, "pending")
         self.assertEqual(EditJob.objects.count(), 0)
+
+
+class VideographerServiceStateTests(TestCase):
+    def setUp(self):
+        cfg = SchedulingSettings.get()
+        cfg.same_state_only = True
+        cfg.max_drive_minutes = 10000
+        cfg.score_penalty_per_minute = 0.01
+        cfg.save()
+
+    def test_service_state_makes_home_state_videographer_eligible_without_changing_address(self):
+        videographer = Videographer.objects.create(
+            name="Multi State Video",
+            email="multi@example.com",
+            state="MA",
+            city="Boston",
+            address="Boston, MA",
+            lat=42.3601,
+            lng=-71.0589,
+            rating=5.0,
+            active=True,
+        )
+        VideographerServiceState.objects.create(videographer=videographer, state="RI")
+
+        ranked = rank_for_shoot(41.8240, -71.4128, shoot_state="RI")
+
+        self.assertEqual([item.videographer for item in ranked], [videographer])
+        self.assertEqual(videographer.state, "MA")
+        self.assertEqual(videographer.address, "Boston, MA")
+        self.assertGreater(ranked[0].drive_minutes, 0)
+
+    def test_same_state_filter_excludes_videographer_without_matching_service_state(self):
+        videographer = Videographer.objects.create(
+            name="Home State Only",
+            email="home@example.com",
+            state="MA",
+            city="Boston",
+            address="Boston, MA",
+            lat=42.3601,
+            lng=-71.0589,
+            rating=5.0,
+            active=True,
+        )
+        VideographerServiceState.objects.create(videographer=videographer, state="MA")
+
+        ranked = rank_for_shoot(41.8240, -71.4128, shoot_state="RI")
+
+        self.assertEqual(ranked, [])
 
 
 class VideographerEscalationTests(TestCase):

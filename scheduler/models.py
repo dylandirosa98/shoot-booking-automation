@@ -1,5 +1,18 @@
 from django.db import models
 
+NORTHEAST_STATE_CHOICES = [
+    ("CT", "Connecticut"),
+    ("DE", "Delaware"),
+    ("MA", "Massachusetts"),
+    ("ME", "Maine"),
+    ("NH", "New Hampshire"),
+    ("NJ", "New Jersey"),
+    ("NY", "New York"),
+    ("PA", "Pennsylvania"),
+    ("RI", "Rhode Island"),
+    ("VT", "Vermont"),
+]
+
 
 class SchedulingSettings(models.Model):
     """
@@ -65,7 +78,7 @@ class Videographer(models.Model):
     name = models.CharField(max_length=100)
     email = models.EmailField()
     phone = models.CharField(max_length=30, blank=True)
-    state = models.CharField(max_length=2, help_text="2-letter state code, e.g. MA")
+    state = models.CharField(max_length=2, help_text="2-letter home/base state, e.g. MA")
     city = models.CharField(max_length=100, blank=True)
     address = models.CharField(max_length=255, blank=True, help_text="Full address used for geocoding")
     lat = models.FloatField(null=True, blank=True)
@@ -78,8 +91,29 @@ class Videographer(models.Model):
     class Meta:
         ordering = ["state", "-rating"]
 
+    @property
+    def service_state_codes(self) -> list[str]:
+        codes = [item.state for item in self.service_states.all()]
+        return codes or ([self.state] if self.state else [])
+
     def __str__(self):
         return f"{self.name} ({self.state} - {self.rating} stars)"
+
+
+class VideographerServiceState(models.Model):
+    videographer = models.ForeignKey(
+        Videographer,
+        on_delete=models.CASCADE,
+        related_name="service_states",
+    )
+    state = models.CharField(max_length=2, choices=NORTHEAST_STATE_CHOICES)
+
+    class Meta:
+        ordering = ["state", "videographer__name"]
+        unique_together = [("videographer", "state")]
+
+    def __str__(self):
+        return f"{self.videographer.name} serves {self.state}"
 
 
 VIDEO_TYPE_CHOICES = [

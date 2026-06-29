@@ -77,7 +77,7 @@
                         {% else %}bg-slate-100 text-slate-600{% endif %}">{{ invite.videographer.rating }}★</div>
                 </div>
                 <div class="text-xs text-slate-500 mt-0.5">
-                    {{ invite.videographer.city }}, {{ invite.videographer.state }} ·
+                    {{ invite.videographer.city }}, {{ invite.videographer.state }} base ·
                     {% if invite.drive_minutes %}~{{ invite.drive_miles|floatformat:0 }} mi / {{ invite.drive_minutes|floatformat:0 }} min ·{% endif %}
                     score {{ invite.score|floatformat:3 }}
                 </div>

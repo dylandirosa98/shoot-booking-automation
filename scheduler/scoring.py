@@ -11,6 +11,7 @@ Filters applied:
 """
 import logging
 from dataclasses import dataclass
+from django.db.models import Q
 from .models import Videographer, SchedulingSettings
 from .distance import estimate_drive
 from .geocode import geocode_with_fallback
@@ -75,7 +76,7 @@ def rank_for_shoot(
 
     qs = Videographer.objects.filter(active=True, lat__isnull=False, lng__isnull=False)
     if same_state_only and shoot_state:
-        qs = qs.filter(state=shoot_state)
+        qs = qs.filter(Q(service_states__state=shoot_state) | Q(state=shoot_state)).distinct()
 
     scored = []
     for v in qs:

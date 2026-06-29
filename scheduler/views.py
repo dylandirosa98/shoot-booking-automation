@@ -99,7 +99,7 @@ def _parse_duration_minutes(duration_str: str) -> int | None:
 
 
 def dashboard(request):
-    videographers = Videographer.objects.all().order_by("state", "-rating")
+    videographers = Videographer.objects.prefetch_related("service_states").all().order_by("state", "-rating")
 
     # Group videographers by state
     by_state = {}

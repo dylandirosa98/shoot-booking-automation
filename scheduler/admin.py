@@ -1,6 +1,6 @@
 from django import forms
 from django.contrib import admin
-from .models import Editor, EditorVideoTypeRank, EditJob, Videographer, Shoot, Invite, SchedulingSettings
+from .models import Editor, EditorVideoTypeRank, EditJob, Videographer, VideographerServiceState, Shoot, Invite, SchedulingSettings
 
 
 @admin.register(SchedulingSettings)
@@ -36,13 +36,24 @@ class VideographerAdminForm(forms.ModelForm):
         self.fields["lng"].help_text = "Required."
 
 
+class VideographerServiceStateInline(admin.TabularInline):
+    model = VideographerServiceState
+    extra = 1
+
+
 @admin.register(Videographer)
 class VideographerAdmin(admin.ModelAdmin):
     form = VideographerAdminForm
-    list_display = ("name", "state", "city", "rating", "active", "has_coords", "email")
-    list_filter = ("state", "active")
+    list_display = ("name", "state", "service_states_display", "city", "rating", "active", "has_coords", "email")
+    list_filter = ("state", "service_states__state", "active")
     search_fields = ("name", "email", "city")
     list_editable = ("active", "rating")
+    inlines = [VideographerServiceStateInline]
+
+
+    @admin.display(description="Service states")
+    def service_states_display(self, obj):
+        return ", ".join(obj.service_state_codes)
 
     @admin.display(boolean=True, description="Coords?")
     def has_coords(self, obj):
