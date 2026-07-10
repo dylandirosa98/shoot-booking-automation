@@ -13,12 +13,14 @@ Flow:
 import logging
 import re
 from datetime import datetime, timedelta
+from django.db import transaction
 from django.utils import timezone
 from .models import Videographer, Shoot, Invite, SchedulingSettings
 from .geocode import geocode, geocode_with_fallback
 from . import notify
 from .scoring import rank_for_shoot
 from .calendar_client import get_client
+from .distance import estimate_drive
 
 logger = logging.getLogger(__name__)
 
@@ -453,6 +455,113 @@ def poll_all_pending_invites() -> None:
 def _decline_and_escalate(invite: Invite, cal) -> None:
     """Mark invite declined and move the same calendar event to the next available person."""
     _move_event_to_next_invite(invite, cal, "declined")
+
+
+def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Invite:
+    """
+    Move the currently-active invite out of the way and send the shoot to the
+    selected videographer next. The rest of the queued chain keeps its order.
+    """
+    with transaction.atomic():
+        shoot = Shoot.objects.select_for_update().get(id=shoot.id)
+        invites = list(
+            Invite.objects.select_for_update()
+            .filter(shoot=shoot)
+            .select_related("videographer")
+            .order_by("rank", "id")
+        )
+
+        current = next(
+            (invite for invite in invites if invite.status == "pending" and invite.google_event_id),
+            None,
+        )
+        event_id = current.google_event_id if current else None
+
+        existing = next((invite for invite in invites if invite.videographer_id == videographer.id), None)
+        if existing and existing.status in {"accepted", "declined", "expired"}:
+            raise ValueError("That videographer already has a completed invite for this shoot.")
+        if existing and existing == current:
+            raise ValueError("That videographer is already the active invitee.")
+
+        if current:
+            current.status = "declined"
+            current.responded_at = timezone.now()
+            current.save(update_fields=["status", "responded_at"])
+
+        if existing:
+            selected = existing
+        else:
+            cfg = SchedulingSettings.get()
+            drive_miles = None
+            drive_minutes = None
+            score = videographer.rating
+            if shoot.lat is not None and shoot.lng is not None and videographer.lat is not None and videographer.lng is not None:
+                drive_miles, drive_minutes = estimate_drive(shoot.lat, shoot.lng, videographer.lat, videographer.lng)
+                score = videographer.rating - (drive_minutes * cfg.score_penalty_per_minute)
+            selected = Invite.objects.create(
+                shoot=shoot,
+                videographer=videographer,
+                rank=len(invites),
+                score=score,
+                drive_miles=drive_miles,
+                drive_minutes=drive_minutes,
+                status="pending",
+                expires_at=timezone.now(),
+            )
+            invites.append(selected)
+
+        completed_before = [
+            invite for invite in invites
+            if invite.id != selected.id and invite.status in {"declined", "expired", "accepted"}
+        ]
+        active_position = len(completed_before)
+        queued_after = [
+            invite for invite in invites
+            if invite.id != selected.id and invite.status in {"pending", "cancelled"}
+        ]
+        ordered = completed_before + [selected] + queued_after
+        for rank, invite in enumerate(ordered):
+            if invite.rank != rank:
+                invite.rank = rank
+                invite.save(update_fields=["rank"])
+
+        shoot.status = "pending"
+        shoot.confirmed_videographer = None
+        shoot.save(update_fields=["status", "confirmed_videographer"])
+
+    return _send_invite(shoot, rank=active_position, reuse_event_id=event_id)
+
+
+def reorder_queued_invites(shoot: Shoot, invite_ids: list[int]) -> None:
+    """
+    Reorder only unsent queued invites. Sent history and the active invite stay
+    fixed so the audit trail remains readable.
+    """
+    with transaction.atomic():
+        invites = list(
+            Invite.objects.select_for_update()
+            .filter(shoot=shoot)
+            .order_by("rank", "id")
+        )
+        queued = [invite for invite in invites if invite.status in {"pending", "cancelled"} and not invite.google_event_id]
+        queued_ids = [invite.id for invite in queued]
+        if sorted(queued_ids) != sorted(invite_ids):
+            raise ValueError("Queued invite list does not match the shoot's reorderable invites.")
+
+        by_id = {invite.id: invite for invite in queued}
+        ordered_queued = [by_id[invite_id] for invite_id in invite_ids]
+        ordered = []
+        queue_iter = iter(ordered_queued)
+        for invite in invites:
+            if invite.id in by_id:
+                ordered.append(next(queue_iter))
+            else:
+                ordered.append(invite)
+
+        for rank, invite in enumerate(ordered):
+            if invite.rank != rank:
+                invite.rank = rank
+                invite.save(update_fields=["rank"])
 
 
 def _move_event_to_next_invite(invite: Invite, cal, final_status: str) -> Invite | None:

@@ -6,6 +6,19 @@
     <a href="/" class="text-sm text-blue-600 hover:text-blue-700">← Back to dashboard</a>
 </div>
 
+{% if messages %}
+<div class="mb-4 space-y-2">
+    {% for message in messages %}
+    <div class="px-4 py-3 rounded-lg text-sm border
+        {% if message.tags == 'success' %}bg-emerald-50 text-emerald-800 border-emerald-200
+        {% elif message.tags == 'error' %}bg-rose-50 text-rose-800 border-rose-200
+        {% else %}bg-slate-50 text-slate-700 border-slate-200{% endif %}">
+        {{ message }}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 <!-- Shoot Header -->
 <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-6 mb-6">
     <div class="flex justify-between items-start mb-4">
@@ -52,6 +65,59 @@
         <div class="text-sm text-slate-700">{{ shoot.notes }}</div>
     </div>
     {% endif %}
+</div>
+
+<!-- Manual Controls -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
+        <div class="flex items-start justify-between gap-4 mb-4">
+            <div>
+                <h2 class="text-lg font-semibold">Manual Send</h2>
+                <p class="text-xs text-slate-500 mt-1">Select an active videographer{% if shoot_state %} serving {{ shoot_state }}{% endif %}. The current active invite will be marked declined.</p>
+            </div>
+        </div>
+        <form method="post" action="{% url 'manual_send' shoot.id %}" class="flex flex-col sm:flex-row gap-3">
+            {% csrf_token %}
+            <select name="videographer_id" class="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+                {% for v in eligible_videographers %}
+                <option value="{{ v.id }}" {% if v.manual_send_disabled %}disabled{% endif %}>
+                    {{ v.name }} · {{ v.city }}, {{ v.state }} · serves {{ v.service_state_codes|join:", " }}{% if v.manual_invite_status != "not_queued" %} · {{ v.manual_invite_status }}{% endif %}
+                </option>
+                {% empty %}
+                <option disabled>No active videographers found{% if shoot_state %} for {{ shoot_state }}{% endif %}</option>
+                {% endfor %}
+            </select>
+            <button class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-sm font-semibold" {% if not manual_send_available %}disabled{% endif %}>Manual Send</button>
+        </form>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
+        <div class="mb-4">
+            <h2 class="text-lg font-semibold">Queued Order</h2>
+            <p class="text-xs text-slate-500 mt-1">Reorder only unsent queued videographers. Sent history and the active invite stay fixed.</p>
+        </div>
+        {% if reorderable_invites|length > 1 %}
+        <form method="post" action="{% url 'reorder_invites' shoot.id %}" id="reorder-form">
+            {% csrf_token %}
+            <div id="queued-list" class="space-y-2 mb-4">
+                {% for invite in reorderable_invites %}
+                <div class="queued-row flex items-center gap-3 rounded-lg border border-slate-200 px-3 py-2 bg-white">
+                    <input type="hidden" name="invite_ids" value="{{ invite.id }}">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm font-medium truncate">{{ invite.videographer.name }}</div>
+                        <div class="text-xs text-slate-500">#{{ invite.rank|add:1 }} now · {{ invite.videographer.city }}, {{ invite.videographer.state }}</div>
+                    </div>
+                    <button type="button" class="move-up px-2 py-1 rounded border border-slate-300 text-xs hover:bg-slate-50">Up</button>
+                    <button type="button" class="move-down px-2 py-1 rounded border border-slate-300 text-xs hover:bg-slate-50">Down</button>
+                </div>
+                {% endfor %}
+            </div>
+            <button class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-700 text-white text-sm font-semibold">Save Order</button>
+        </form>
+        {% else %}
+        <div class="text-sm text-slate-500 py-3">No queued list to reorder yet.</div>
+        {% endif %}
+    </div>
 </div>
 
 <!-- Invite Chain -->
@@ -135,4 +201,20 @@
         {% endfor %}
     </div>
 </div>
+<script>
+    document.querySelectorAll('.move-up').forEach((button) => {
+        button.addEventListener('click', () => {
+            const row = button.closest('.queued-row');
+            const previous = row.previousElementSibling;
+            if (previous) row.parentNode.insertBefore(row, previous);
+        });
+    });
+    document.querySelectorAll('.move-down').forEach((button) => {
+        button.addEventListener('click', () => {
+            const row = button.closest('.queued-row');
+            const next = row.nextElementSibling;
+            if (next) row.parentNode.insertBefore(next, row);
+        });
+    });
+</script>
 {% endblock %}

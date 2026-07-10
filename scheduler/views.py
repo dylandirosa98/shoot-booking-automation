@@ -3,16 +3,19 @@ import json
 import logging
 from datetime import datetime
 from django.conf import settings
+from django.contrib import messages
+from django.db.models import Q
 from django.http import JsonResponse, HttpResponseForbidden, HttpResponseBadRequest
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
-from .models import Editor, EditJob, Videographer, Shoot, Invite, SchedulingSettings
+from .models import Editor, EditJob, Videographer, Shoot, Invite, SchedulingSettings, NORTHEAST_STATE_CHOICES
 from .orchestrator import (
     handle_new_shoot, handle_updated_shoot, handle_deleted_shoot,
-    check_and_escalate, _mark_accepted,
+    check_and_escalate, _mark_accepted, _state_from_location,
+    manual_send_to_videographer, reorder_queued_invites,
 )
 from .editing import handle_deleted_edit_job, handle_new_edit_job, handle_updated_edit_job
 
@@ -101,10 +104,11 @@ def _parse_duration_minutes(duration_str: str) -> int | None:
 def dashboard(request):
     videographers = Videographer.objects.prefetch_related("service_states").all().order_by("state", "-rating")
 
-    # Group videographers by state
-    by_state = {}
+    # Group by every state served, not just each videographer's home state.
+    by_state = {code: [] for code, _name in NORTHEAST_STATE_CHOICES}
     for v in videographers:
-        by_state.setdefault(v.state, []).append(v)
+        for state in v.service_state_codes:
+            by_state.setdefault(state, []).append(v)
 
     # Upcoming = shoot hasn't happened yet; show regardless of status (anything
     # can still change up until the shoot starts).
@@ -205,8 +209,89 @@ def shoot_detail(request, shoot_id):
         Shoot.objects.prefetch_related("invites__videographer"),
         id=shoot_id,
     )
-    invites = shoot.invites.all().order_by("rank")
-    return render(request, "shoot_detail.html", {"shoot": shoot, "invites": invites})
+    invites = list(shoot.invites.all().order_by("rank"))
+    shoot_state = _state_from_location(shoot.location)
+
+    eligible_qs = Videographer.objects.filter(active=True).prefetch_related("service_states")
+    if shoot_state:
+        eligible_qs = eligible_qs.filter(Q(service_states__state=shoot_state) | Q(state=shoot_state)).distinct()
+    eligible_qs = eligible_qs.order_by("state", "-rating", "name")
+
+    invite_by_videographer_id = {invite.videographer_id: invite for invite in invites}
+    eligible_videographers = []
+    for videographer in eligible_qs:
+        existing = invite_by_videographer_id.get(videographer.id)
+        videographer.manual_invite_status = existing.status if existing else "not_queued"
+        videographer.manual_send_disabled = bool(
+            existing and (
+                existing.status in {"accepted", "declined", "expired"}
+                or (existing.status == "pending" and existing.google_event_id)
+            )
+        )
+        eligible_videographers.append(videographer)
+
+    reorderable_invites = [
+        invite for invite in invites
+        if invite.status in {"pending", "cancelled"} and not invite.google_event_id
+    ]
+    manual_send_available = (
+        shoot.status in {"pending", "failed"}
+        and any(not videographer.manual_send_disabled for videographer in eligible_videographers)
+    )
+
+    return render(request, "shoot_detail.html", {
+        "shoot": shoot,
+        "invites": invites,
+        "shoot_state": shoot_state,
+        "eligible_videographers": eligible_videographers,
+        "reorderable_invites": reorderable_invites,
+        "manual_send_available": manual_send_available,
+    })
+
+
+@require_POST
+def manual_send(request, shoot_id):
+    shoot = get_object_or_404(Shoot, id=shoot_id)
+    if shoot.status not in {"pending", "failed"}:
+        messages.error(request, "Manual send is only available for pending or failed shoots.")
+        return redirect("shoot_detail", shoot_id=shoot.id)
+
+    videographer_id = request.POST.get("videographer_id")
+    if not videographer_id:
+        messages.error(request, "Choose a videographer before sending manually.")
+        return redirect("shoot_detail", shoot_id=shoot.id)
+
+    videographer = get_object_or_404(Videographer, id=videographer_id, active=True)
+    shoot_state = _state_from_location(shoot.location)
+    if shoot_state and not (videographer.state == shoot_state or videographer.service_states.filter(state=shoot_state).exists()):
+        messages.error(request, f"{videographer.name} does not serve {shoot_state}.")
+        return redirect("shoot_detail", shoot_id=shoot.id)
+
+    try:
+        manual_send_to_videographer(shoot, videographer)
+        messages.success(request, f"Manual invite sent to {videographer.name}.")
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    return redirect("shoot_detail", shoot_id=shoot.id)
+
+
+@require_POST
+def reorder_invites(request, shoot_id):
+    shoot = get_object_or_404(Shoot, id=shoot_id)
+    invite_ids = []
+    for raw_id in request.POST.getlist("invite_ids"):
+        try:
+            invite_ids.append(int(raw_id))
+        except (TypeError, ValueError):
+            messages.error(request, "Invite order contained an invalid row.")
+            return redirect("shoot_detail", shoot_id=shoot.id)
+
+    try:
+        reorder_queued_invites(shoot, invite_ids)
+        messages.success(request, "Queued invite order updated.")
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    return redirect("shoot_detail", shoot_id=shoot.id)
 
 
 @require_POST

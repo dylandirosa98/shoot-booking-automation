@@ -230,6 +230,27 @@ class VideographerServiceStateTests(TestCase):
 
         self.assertEqual(ranked, [])
 
+    def test_dashboard_lists_videographer_under_each_service_state_and_empty_states(self):
+        videographer = Videographer.objects.create(
+            name="Multi State Video",
+            email="multi@example.com",
+            state="MA",
+            city="Boston",
+            address="Boston, MA",
+            lat=42.3601,
+            lng=-71.0589,
+            rating=5.0,
+            active=True,
+        )
+        VideographerServiceState.objects.create(videographer=videographer, state="MA")
+        VideographerServiceState.objects.create(videographer=videographer, state="CT")
+
+        response = Client().get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Multi State Video", count=2)
+        self.assertContains(response, "No videographers currently serve DE.")
+
 
 class VideographerEscalationTests(TestCase):
     def setUp(self):
@@ -298,6 +319,221 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(first_invite.status, "accepted")
         self.assertEqual(second_invite.google_event_id, "")
         self.assertFalse(fake_calendar.status_checked)
+
+    def test_shoot_detail_renders_manual_controls(self):
+        shoot, _first_invite, _second_invite = self._shoot_with_invites()
+
+        response = Client().get(f"/shoots/{shoot.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Manual Send")
+        self.assertContains(response, "Queued Order")
+
+    def test_manual_send_moves_selected_invite_next_and_reuses_event(self):
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        third = Videographer.objects.create(
+            name="Third Video", email="third@example.com", state="MI", rating=4.6, active=True,
+        )
+        third_invite = Invite.objects.create(
+            shoot=shoot,
+            videographer=third,
+            rank=2,
+            score=8,
+            drive_miles=7,
+            drive_minutes=14,
+            status="pending",
+            expires_at=timezone.now(),
+        )
+
+        class FakeCalendar:
+            def __init__(self):
+                self.replacements = []
+
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.replacements.append((event_id, attendee_email))
+                return event_id
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                response = Client().post(
+                    f"/shoots/{shoot.id}/manual-send/",
+                    data={"videographer_id": str(third.id)},
+                )
+
+        self.assertEqual(response.status_code, 302)
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        third_invite.refresh_from_db()
+        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(first_invite.rank, 0)
+        self.assertEqual(third_invite.status, "pending")
+        self.assertEqual(third_invite.rank, 1)
+        self.assertEqual(third_invite.google_event_id, "event-123")
+        self.assertEqual(second_invite.rank, 2)
+        self.assertEqual(fake_calendar.replacements, [("event-123", "third@example.com")])
+
+    def test_manual_send_existing_queued_invite_does_not_duplicate_and_rewrites_chain(self):
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        third = Videographer.objects.create(
+            name="Third Video", email="third@example.com", state="MI", rating=4.6, active=True,
+        )
+        fourth = Videographer.objects.create(
+            name="Fourth Video", email="fourth@example.com", state="MI", rating=4.4, active=True,
+        )
+        third_invite = Invite.objects.create(
+            shoot=shoot, videographer=third, rank=2, score=8,
+            drive_miles=7, drive_minutes=14, status="pending", expires_at=timezone.now(),
+        )
+        fourth_invite = Invite.objects.create(
+            shoot=shoot, videographer=fourth, rank=3, score=7,
+            drive_miles=8, drive_minutes=16, status="pending", expires_at=timezone.now(),
+        )
+
+        class FakeCalendar:
+            def __init__(self):
+                self.replacements = []
+
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.replacements.append((event_id, attendee_email, "Third" in description))
+                return event_id
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check") as schedule_check:
+                response = Client().post(
+                    f"/shoots/{shoot.id}/manual-send/",
+                    data={"videographer_id": str(third.id)},
+                )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Invite.objects.filter(shoot=shoot).count(), 4)
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        third_invite.refresh_from_db()
+        fourth_invite.refresh_from_db()
+        shoot.refresh_from_db()
+
+        self.assertEqual(shoot.status, "pending")
+        self.assertIsNone(shoot.confirmed_videographer)
+        self.assertEqual(first_invite.status, "declined")
+        self.assertIsNotNone(first_invite.responded_at)
+        self.assertEqual(first_invite.google_event_id, "event-123")
+        self.assertEqual(third_invite.status, "pending")
+        self.assertEqual(third_invite.google_event_id, "event-123")
+        self.assertGreater(third_invite.expires_at, timezone.now())
+        self.assertEqual(second_invite.status, "pending")
+        self.assertEqual(second_invite.google_event_id, "")
+        self.assertEqual(fourth_invite.status, "pending")
+        self.assertEqual(fourth_invite.google_event_id, "")
+        self.assertEqual(
+            list(shoot.invites.order_by("rank").values_list("videographer__email", "status", "google_event_id")),
+            [
+                ("first@example.com", "declined", "event-123"),
+                ("third@example.com", "pending", "event-123"),
+                ("second@example.com", "pending", ""),
+                ("fourth@example.com", "pending", ""),
+            ],
+        )
+        self.assertEqual(fake_calendar.replacements, [("event-123", "third@example.com", True)])
+        schedule_check.assert_called_once_with(third_invite.id)
+
+    def test_manual_send_existing_queued_then_decline_continues_with_original_next_person(self):
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        third = Videographer.objects.create(
+            name="Third Video", email="third@example.com", state="MI", rating=4.6, active=True,
+        )
+        fourth = Videographer.objects.create(
+            name="Fourth Video", email="fourth@example.com", state="MI", rating=4.4, active=True,
+        )
+        third_invite = Invite.objects.create(
+            shoot=shoot, videographer=third, rank=2, score=8,
+            drive_miles=7, drive_minutes=14, status="pending", expires_at=timezone.now(),
+        )
+        fourth_invite = Invite.objects.create(
+            shoot=shoot, videographer=fourth, rank=3, score=7,
+            drive_miles=8, drive_minutes=16, status="pending", expires_at=timezone.now(),
+        )
+
+        class FakeCalendar:
+            def __init__(self):
+                self.replacements = []
+                self.status_checks = []
+
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.replacements.append((event_id, attendee_email))
+                return event_id
+
+            def get_attendee_status(self, event_id, attendee_email):
+                self.status_checks.append((event_id, attendee_email))
+                return "declined"
+
+            def cancel_event(self, event_id):
+                raise AssertionError("Manual decline should move the event to the next queued videographer")
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                Client().post(
+                    f"/shoots/{shoot.id}/manual-send/",
+                    data={"videographer_id": str(third.id)},
+                )
+                poll_all_pending_invites()
+
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        third_invite.refresh_from_db()
+        fourth_invite.refresh_from_db()
+        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(third_invite.status, "declined")
+        self.assertEqual(second_invite.status, "pending")
+        self.assertEqual(second_invite.google_event_id, "event-123")
+        self.assertEqual(fourth_invite.status, "pending")
+        self.assertEqual(fourth_invite.google_event_id, "")
+        self.assertEqual(
+            list(shoot.invites.order_by("rank").values_list("videographer__email", "status")),
+            [
+                ("first@example.com", "declined"),
+                ("third@example.com", "declined"),
+                ("second@example.com", "pending"),
+                ("fourth@example.com", "pending"),
+            ],
+        )
+        self.assertEqual(fake_calendar.status_checks, [("event-123", "third@example.com")])
+        self.assertEqual(
+            fake_calendar.replacements,
+            [("event-123", "third@example.com"), ("event-123", "second@example.com")],
+        )
+
+    def test_reorder_invites_changes_only_unsent_queue(self):
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        third = Videographer.objects.create(
+            name="Third Video", email="third@example.com", state="MI", rating=4.6, active=True,
+        )
+        third_invite = Invite.objects.create(
+            shoot=shoot,
+            videographer=third,
+            rank=2,
+            score=8,
+            drive_miles=7,
+            drive_minutes=14,
+            status="pending",
+            expires_at=timezone.now(),
+        )
+
+        response = Client().post(
+            f"/shoots/{shoot.id}/reorder-invites/",
+            data={"invite_ids": [str(third_invite.id), str(second_invite.id)]},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        third_invite.refresh_from_db()
+        self.assertEqual(first_invite.rank, 0)
+        self.assertEqual(third_invite.rank, 1)
+        self.assertEqual(second_invite.rank, 2)
+        self.assertEqual(first_invite.google_event_id, "event-123")
 
     def test_escalation_reuses_calendar_event_for_next_videographer(self):
         _, first_invite, second_invite = self._shoot_with_invites()
