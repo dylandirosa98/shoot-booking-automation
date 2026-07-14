@@ -98,7 +98,7 @@ class EditJobAdmin(admin.ModelAdmin):
 
 @admin.register(Shoot)
 class ShootAdmin(admin.ModelAdmin):
-    list_display = ("title", "location", "shoot_datetime", "status", "confirmed_videographer")
+    list_display = ("title", "location", "shoot_datetime", "status", "confirmed_videographer", "google_drive_folder_url")
     list_filter = ("status",)
     search_fields = ("title", "location", "pipedrive_deal_id")
     inlines = [InviteInline]
@@ -106,6 +106,6 @@ class ShootAdmin(admin.ModelAdmin):
 
 @admin.register(Invite)
 class InviteAdmin(admin.ModelAdmin):
-    list_display = ("videographer", "shoot", "rank", "status", "sent_at", "expires_at")
+    list_display = ("videographer", "shoot", "rank", "status", "sent_at", "expires_at", "google_drive_permission_id")
     list_filter = ("status",)
     search_fields = ("videographer__name", "shoot__title")

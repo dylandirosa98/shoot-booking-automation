@@ -20,6 +20,7 @@ from .geocode import geocode, geocode_with_fallback
 from . import notify
 from .scoring import rank_for_shoot
 from .calendar_client import get_client
+from .drive_client import get_drive_client
 from .distance import estimate_drive
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,61 @@ def _invite_message(shoot: Shoot, videographer: Videographer, miles: float, minu
         "If we don't hear back, we'll offer it to the next videographer."
     )
     return "\n\n".join(sections)
+
+
+def _drive_folder_name(shoot: Shoot) -> str:
+    """A human-readable folder name based on the required location and time."""
+    local_start = timezone.localtime(shoot.shoot_datetime)
+    return f"{shoot.location} — {local_start:%Y-%m-%d %-I:%M %p}"
+
+
+def _ensure_drive_folder_shared(invite: Invite) -> bool:
+    """Create, persist, and share the confirmed shoot folder exactly once."""
+    try:
+        with transaction.atomic():
+            invite = (Invite.objects.select_for_update()
+                      .select_related("shoot", "videographer")
+                      .get(id=invite.id))
+            shoot = Shoot.objects.select_for_update().get(id=invite.shoot_id)
+            if invite.status != "accepted" or shoot.confirmed_videographer_id != invite.videographer_id:
+                return False
+
+            drive = get_drive_client()
+            if not shoot.google_drive_folder_id:
+                folder = drive.create_folder(name=_drive_folder_name(shoot), shoot_id=shoot.id)
+                shoot.google_drive_folder_id = folder.id
+                shoot.google_drive_folder_url = folder.url
+                shoot.google_drive_error = ""
+                shoot.save(update_fields=[
+                    "google_drive_folder_id", "google_drive_folder_url", "google_drive_error",
+                ])
+
+            if not invite.google_drive_permission_id:
+                invite.google_drive_permission_id = drive.share_folder(
+                    folder_id=shoot.google_drive_folder_id,
+                    email=invite.videographer.email,
+                )
+                invite.save(update_fields=["google_drive_permission_id"])
+            return True
+    except Exception as exc:
+        logger.exception("Failed to create/share Drive folder for accepted invite %s", invite.id)
+        Shoot.objects.filter(id=invite.shoot_id).update(google_drive_error=str(exc)[:2000])
+        return False
+
+
+def _remove_drive_access(invite: Invite) -> None:
+    """Remove the direct share when an accepted videographer later declines."""
+    if not invite.google_drive_permission_id or not invite.shoot.google_drive_folder_id:
+        return
+    try:
+        get_drive_client().remove_permission(
+            folder_id=invite.shoot.google_drive_folder_id,
+            permission_id=invite.google_drive_permission_id,
+        )
+        invite.google_drive_permission_id = ""
+        invite.save(update_fields=["google_drive_permission_id"])
+    except Exception:
+        logger.exception("Failed to remove Drive access for invite %s", invite.id)
 
 
 # --- main entry point ---
@@ -450,6 +506,9 @@ def poll_all_pending_invites() -> None:
                     invite.id, invite.videographer.email,
                 )
                 _handle_post_acceptance_decline(invite, cal)
+            else:
+                # Retry a transient Drive error without sending a duplicate share.
+                _ensure_drive_folder_shared(invite)
 
 
 def _decline_and_escalate(invite: Invite, cal) -> None:
@@ -589,6 +648,7 @@ def _handle_post_acceptance_decline(invite: Invite, cal) -> None:
     eligible again because their cancellation only happened because we thought
     we had someone.
     """
+    _remove_drive_access(invite)
     invite.status = "declined"
     invite.responded_at = timezone.now()
     invite.save(update_fields=["status", "responded_at"])
@@ -646,6 +706,8 @@ def _mark_accepted(invite: Invite) -> None:
             cal.cancel_event(other.google_event_id)
         other.status = "cancelled"
         other.save(update_fields=["status"])
+
+    _ensure_drive_folder_shared(invite)
 
     logger.info("Shoot %s confirmed with %s", invite.shoot.id, invite.videographer.name)
     # TODO: notify owner

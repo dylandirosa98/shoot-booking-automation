@@ -92,24 +92,26 @@ friend's company Google account, without re-logging in.
 ### One-time setup
 
 1. Same Google Cloud project as above.
-2. APIs & Services -> Library -> enable **Google Calendar API**.
+2. APIs & Services -> Library -> enable **Google Calendar API** and **Google Drive API**.
 3. APIs & Services -> OAuth consent screen:
    - User Type: External
    - App name: "Hockey Shoot Scheduler" (or whatever)
    - Add your friend's email as a test user
-   - Scopes: add `https://www.googleapis.com/auth/calendar.events`
+   - Scopes: add `https://www.googleapis.com/auth/calendar.events`, `https://www.googleapis.com/auth/gmail.send`, and `https://www.googleapis.com/auth/drive.file`
 4. Credentials -> Create credentials -> OAuth client ID:
    - Application type: Desktop app
    - Download the JSON. Copy `client_id` and `client_secret` into `.env`.
-5. Run the helper script (we will build this — TBD):
+5. Run the OAuth helper:
    ```
-   python scripts/get_refresh_token.py
+   python manage.py get_google_refresh_token
    ```
-   It opens a browser, your friend logs in, grants permission, and the
-   script prints a `refresh_token`. Paste it into `GOOGLE_OAUTH_REFRESH_TOKEN`.
+   It opens a browser; sign in as the company Google account and grant the requested permissions. It saves a new refresh token into `.env`.
 
-After this, the app can create calendar events forever (refresh tokens don't expire
-unless revoked or unused for 6+ months).
+After this, the app can create calendar events and Drive shoot folders. The Drive share is sent automatically when a videographer accepts.
+
+Optional: create a parent folder in Drive for all shoots and set `GOOGLE_DRIVE_PARENT_FOLDER_ID` to the ID in that folder's URL. Leave it blank to create folders in My Drive.
+
+Refresh tokens can be revoked or expire after six months of non-use.
 
 ---
 

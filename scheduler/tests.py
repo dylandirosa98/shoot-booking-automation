@@ -6,9 +6,10 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from .clickup_client import ClickUpTaskResult
+from .drive_client import DriveFolder
 from .editing import rank_editors
 from .models import Editor, EditorVideoTypeRank, EditJob, Invite, SchedulingSettings, Shoot, Videographer, VideographerServiceState
-from .orchestrator import check_and_escalate, poll_all_pending_invites
+from .orchestrator import _mark_accepted, check_and_escalate, poll_all_pending_invites
 from .scoring import rank_for_shoot
 
 
@@ -593,3 +594,34 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(first_invite.status, "declined")
         self.assertEqual(second_invite.google_event_id, "event-123")
         self.assertEqual(fake_calendar.replacements, [("event-123", "second@example.com")])
+
+    def test_accepted_invite_creates_and_shares_drive_folder_once(self):
+        shoot, first_invite, _ = self._shoot_with_invites()
+
+        class FakeDrive:
+            def __init__(self):
+                self.created = []
+                self.shared = []
+
+            def create_folder(self, *, name, shoot_id):
+                self.created.append((name, shoot_id))
+                return DriveFolder(id="folder-123", url="https://drive.example/folder-123")
+
+            def share_folder(self, *, folder_id, email):
+                self.shared.append((folder_id, email))
+                return "permission-123"
+
+        fake_drive = FakeDrive()
+        with patch("scheduler.orchestrator.get_drive_client", return_value=fake_drive):
+            _mark_accepted(first_invite)
+            _mark_accepted(first_invite)
+
+        shoot.refresh_from_db()
+        first_invite.refresh_from_db()
+        self.assertEqual(shoot.status, "confirmed")
+        self.assertEqual(shoot.google_drive_folder_id, "folder-123")
+        self.assertEqual(shoot.google_drive_folder_url, "https://drive.example/folder-123")
+        self.assertEqual(first_invite.google_drive_permission_id, "permission-123")
+        self.assertEqual(fake_drive.created[0][1], shoot.id)
+        self.assertTrue(fake_drive.created[0][0].startswith("Detroit, MI — "))
+        self.assertEqual(fake_drive.shared, [("folder-123", "first@example.com")])
