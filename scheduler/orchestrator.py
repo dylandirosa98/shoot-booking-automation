@@ -396,29 +396,40 @@ def _send_invite(shoot: Shoot, rank: int, reuse_event_id: str | None = None) -> 
     if not invite:
         return None
 
-    cal = get_client()
     description = _invite_message(shoot, invite.videographer, invite.drive_miles or 0, invite.drive_minutes or 0)
-    if reuse_event_id:
-        event_id = cal.replace_event_attendee(
-            event_id=reuse_event_id,
-            description=description,
-            attendee_email=invite.videographer.email,
-        )
-    else:
-        end = shoot.shoot_datetime + timedelta(minutes=shoot.duration_minutes)
-        event_id = cal.create_event(
-            summary=f"Hockey shoot - {shoot.title or shoot.location}",
-            description=description,
-            location=shoot.location,
-            start=shoot.shoot_datetime,
-            end=end,
-            attendee_email=invite.videographer.email,
-        )
+    try:
+        cal = get_client()
+        if reuse_event_id:
+            event_id = cal.replace_event_attendee(
+                event_id=reuse_event_id,
+                description=description,
+                attendee_email=invite.videographer.email,
+            )
+        else:
+            end = shoot.shoot_datetime + timedelta(minutes=shoot.duration_minutes)
+            event_id = cal.create_event(
+                summary=f"Hockey shoot - {shoot.title or shoot.location}",
+                description=description,
+                location=shoot.location,
+                start=shoot.shoot_datetime,
+                end=end,
+                attendee_email=invite.videographer.email,
+            )
+    except Exception as exc:
+        invite.calendar_error = str(exc)[:2000]
+        invite.calendar_last_attempt_at = timezone.now()
+        invite.save(update_fields=["calendar_error", "calendar_last_attempt_at"])
+        logger.exception("Calendar invite send failed for invite %s", invite.id)
+        return None
 
     cfg = SchedulingSettings.get()
     invite.google_event_id = event_id
     invite.expires_at = timezone.now() + timedelta(hours=cfg.escalation_hours)
-    invite.save(update_fields=["google_event_id", "expires_at"])
+    invite.calendar_error = ""
+    invite.calendar_last_attempt_at = timezone.now()
+    invite.save(update_fields=[
+        "google_event_id", "expires_at", "calendar_error", "calendar_last_attempt_at",
+    ])
 
     # Schedule the escalation check
     from .jobs import schedule_escalation_check
@@ -472,6 +483,26 @@ def poll_all_pending_invites() -> None:
       needsAction-> nothing (treat as still accepted until they explicitly decline)
     """
     now = timezone.now()
+    # A failed Calendar create has no event ID, so it is invisible to the
+    # response-status poll below. Retry only the first unsent pending invite
+    # per shoot; later ranks remain queued until it is resolved.
+    unsent_invites = (Invite.objects
+                      .filter(status="pending", google_event_id="", shoot__status="pending",
+                              shoot__shoot_datetime__gte=now)
+                      .select_related("shoot")
+                      .order_by("shoot_id", "rank"))
+    shoots_with_active_event = set(
+        Invite.objects.filter(status="pending", google_event_id__gt="", shoot__shoot_datetime__gte=now)
+        .values_list("shoot_id", flat=True)
+    )
+    retried_shoot_ids: set[int] = set()
+    for invite in unsent_invites:
+        if invite.shoot_id in shoots_with_active_event or invite.shoot_id in retried_shoot_ids:
+            continue
+        logger.warning("Retrying Calendar invite %s after prior failure: %s", invite.id, invite.calendar_error)
+        _send_invite(invite.shoot, rank=invite.rank)
+        retried_shoot_ids.add(invite.shoot_id)
+
     # Anything we still care about: pending OR accepted, and shoot hasn't started
     invites = (Invite.objects
                .filter(status__in=["pending", "accepted"],

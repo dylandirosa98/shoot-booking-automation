@@ -252,6 +252,8 @@ class Invite(models.Model):
     drive_minutes = models.FloatField(null=True, blank=True)
     drive_miles = models.FloatField(null=True, blank=True)
     google_event_id = models.CharField(max_length=200, blank=True)
+    calendar_error = models.TextField(blank=True)
+    calendar_last_attempt_at = models.DateTimeField(null=True, blank=True)
     google_drive_permission_id = models.CharField(max_length=200, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     sent_at = models.DateTimeField(auto_now_add=True)

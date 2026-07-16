@@ -9,7 +9,7 @@ from .clickup_client import ClickUpTaskResult
 from .drive_client import DriveFolder
 from .editing import rank_editors
 from .models import Editor, EditorVideoTypeRank, EditJob, Invite, SchedulingSettings, Shoot, Videographer, VideographerServiceState
-from .orchestrator import _mark_accepted, check_and_escalate, poll_all_pending_invites
+from .orchestrator import _mark_accepted, _send_invite, check_and_escalate, poll_all_pending_invites
 from .scoring import rank_for_shoot
 
 
@@ -625,3 +625,48 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(fake_drive.created[0][1], shoot.id)
         self.assertTrue(fake_drive.created[0][0].startswith("Detroit, MI — "))
         self.assertEqual(fake_drive.shared, [("folder-123", "first@example.com")])
+
+    def test_failed_calendar_send_records_error_without_event(self):
+        shoot, _first_invite, second_invite = self._shoot_with_invites()
+
+        class FailingCalendar:
+            def create_event(self, **kwargs):
+                raise RuntimeError("Calendar credentials rejected")
+
+        with patch("scheduler.orchestrator.get_client", return_value=FailingCalendar()):
+            result = _send_invite(shoot, rank=second_invite.rank)
+
+        second_invite.refresh_from_db()
+        self.assertIsNone(result)
+        self.assertEqual(second_invite.google_event_id, "")
+        self.assertIn("Calendar credentials rejected", second_invite.calendar_error)
+        self.assertIsNotNone(second_invite.calendar_last_attempt_at)
+
+    def test_poll_retries_one_unsent_calendar_invite(self):
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        first_invite.google_event_id = ""
+        first_invite.calendar_error = "Previous Calendar failure"
+        first_invite.save(update_fields=["google_event_id", "calendar_error"])
+
+        class FakeCalendar:
+            def __init__(self):
+                self.created_for = []
+
+            def create_event(self, **kwargs):
+                self.created_for.append(kwargs["attendee_email"])
+                return "retry-event-123"
+
+            def get_attendee_status(self, event_id, attendee_email):
+                return "needsAction"
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                poll_all_pending_invites()
+
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        self.assertEqual(first_invite.google_event_id, "retry-event-123")
+        self.assertEqual(first_invite.calendar_error, "")
+        self.assertEqual(second_invite.google_event_id, "")
+        self.assertEqual(fake_calendar.created_for, ["first@example.com"])

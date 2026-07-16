@@ -176,6 +176,10 @@
                         sent {{ invite.sent_at|date:"M j g:i A" }}<br>
                         expires {{ invite.expires_at|date:"M j g:i A" }}
                     </div>
+                {% elif invite.status == "pending" and invite.calendar_error %}
+                    <span class="inline-block px-2 py-1 rounded bg-rose-100 text-rose-700 text-xs font-semibold">Calendar send failed — retrying</span>
+                    <div class="text-[11px] text-rose-600 mt-1 max-w-xs">{{ invite.calendar_error|truncatechars:160 }}</div>
+                    <div class="text-[11px] text-slate-400 mt-1">last attempt {{ invite.calendar_last_attempt_at|date:"M j g:i A" }}</div>
                 {% else %}
                     <span class="inline-block px-2 py-1 rounded bg-slate-100 text-slate-500 text-xs">Queued</span>
                 {% endif %}
