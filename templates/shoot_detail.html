@@ -73,18 +73,19 @@
         <div class="flex items-start justify-between gap-4 mb-4">
             <div>
                 <h2 class="text-lg font-semibold">Manual Send</h2>
-                <p class="text-xs text-slate-500 mt-1">Search the full active roster. Service states are shown for reference; the current active invite will be marked declined.</p>
+                <p class="text-xs text-slate-500 mt-1">Search the full active roster, then choose the videographer from the dropdown. Service states are shown for reference; the current active invite will be marked declined.</p>
             </div>
         </div>
         <form method="post" action="{% url 'manual_send' shoot.id %}" class="space-y-4">
             {% csrf_token %}
             <div>
-                <label for="videographer-search" class="block text-xs font-medium text-slate-600 mb-1">Find videographer</label>
+                <label for="videographer-search" class="block text-xs font-medium text-slate-600 mb-1">1. Search roster <span class="font-normal text-slate-400">(optional)</span></label>
                 <input id="videographer-search" type="search" placeholder="Search name, email, city, or state" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" autocomplete="off">
             </div>
             <div>
-                <label for="videographer-id" class="block text-xs font-medium text-slate-600 mb-1">Videographer</label>
-                <select id="videographer-id" name="videographer_id" size="5" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+                <label for="videographer-id" class="block text-xs font-medium text-slate-600 mb-1">2. Select videographer</label>
+                <select id="videographer-id" name="videographer_id" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+                    <option value="" disabled selected data-placeholder="true">Select a videographer…</option>
                     {% for v in eligible_videographers %}
                     <option value="{{ v.id }}" data-search="{{ v.name }} {{ v.email }} {{ v.city }} {{ v.state }} {{ v.service_state_codes|join:' ' }}" {% if v.manual_send_disabled %}disabled{% endif %}>
                         {{ v.name }} · {{ v.email }} · {{ v.city }}, {{ v.state }} · serves {{ v.service_state_codes|join:", " }}{% if v.manual_invite_status != "not_queued" %} · {{ v.manual_invite_status }}{% endif %}
@@ -102,7 +103,7 @@
             </div>
             <div class="flex flex-wrap gap-3">
                 <button name="action" value="save_notes" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-sm font-semibold">Save Notes</button>
-                <button name="action" value="send" class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-sm font-semibold" {% if not manual_send_available %}disabled{% endif %}>Save &amp; Send Invite</button>
+                <button name="action" value="send" class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-sm font-semibold" {% if not manual_send_available %}disabled{% endif %}>Save &amp; Send to Selected Videographer</button>
             </div>
         </form>
     </div>
@@ -219,7 +220,9 @@
                 option.hidden = !visible;
                 if (visible && !option.disabled) matches += 1;
             });
-            if (videographerSelect.selectedOptions[0]?.hidden) {
+            if (!query && videographerSelect.selectedIndex === -1) {
+                videographerSelect.selectedIndex = 0;
+            } else if (videographerSelect.selectedOptions[0]?.hidden) {
                 videographerSelect.selectedIndex = -1;
             }
             noVideographerMatches.classList.toggle('hidden', matches > 0);

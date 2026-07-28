@@ -730,5 +730,6 @@ class VideographerEscalationTests(TestCase):
         response = Client().get(f"/shoots/{shoot.id}/")
 
         self.assertContains(response, "videographer-search")
+        self.assertContains(response, "Select a videographer")
         self.assertContains(response, "Boston Search Result")
         self.assertContains(response, out_of_state.email)
