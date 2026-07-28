@@ -4,7 +4,6 @@ import logging
 from datetime import datetime
 from django.conf import settings
 from django.contrib import messages
-from django.db.models import Q
 from django.http import JsonResponse, HttpResponseForbidden, HttpResponseBadRequest
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils import timezone
@@ -212,9 +211,9 @@ def shoot_detail(request, shoot_id):
     invites = list(shoot.invites.all().order_by("rank"))
     shoot_state = _state_from_location(shoot.location)
 
+    # Manual sends intentionally allow the entire active roster. Service state
+    # is still shown in the UI as a useful reference, but is not a restriction.
     eligible_qs = Videographer.objects.filter(active=True).prefetch_related("service_states")
-    if shoot_state:
-        eligible_qs = eligible_qs.filter(Q(service_states__state=shoot_state) | Q(state=shoot_state)).distinct()
     eligible_qs = eligible_qs.order_by("state", "-rating", "name")
 
     invite_by_videographer_id = {invite.videographer_id: invite for invite in invites}
@@ -252,6 +251,15 @@ def shoot_detail(request, shoot_id):
 @require_POST
 def manual_send(request, shoot_id):
     shoot = get_object_or_404(Shoot, id=shoot_id)
+    notes = request.POST.get("notes")
+    if notes is not None:
+        shoot.notes = notes.strip()
+        shoot.save(update_fields=["notes"])
+
+    if request.POST.get("action") == "save_notes":
+        messages.success(request, "Invite notes saved.")
+        return redirect("shoot_detail", shoot_id=shoot.id)
+
     if shoot.status not in {"pending", "failed"}:
         messages.error(request, "Manual send is only available for pending or failed shoots.")
         return redirect("shoot_detail", shoot_id=shoot.id)
@@ -262,10 +270,6 @@ def manual_send(request, shoot_id):
         return redirect("shoot_detail", shoot_id=shoot.id)
 
     videographer = get_object_or_404(Videographer, id=videographer_id, active=True)
-    shoot_state = _state_from_location(shoot.location)
-    if shoot_state and not (videographer.state == shoot_state or videographer.service_states.filter(state=shoot_state).exists()):
-        messages.error(request, f"{videographer.name} does not serve {shoot_state}.")
-        return redirect("shoot_detail", shoot_id=shoot.id)
 
     try:
         manual_send_to_videographer(shoot, videographer)

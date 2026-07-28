@@ -670,3 +670,65 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(first_invite.calendar_error, "")
         self.assertEqual(second_invite.google_event_id, "")
         self.assertEqual(fake_calendar.created_for, ["first@example.com"])
+
+    def test_manual_send_allows_an_active_out_of_state_videographer(self):
+        shoot, first_invite, _second_invite = self._shoot_with_invites()
+        out_of_state = Videographer.objects.create(
+            name="Out of State Video", email="outofstate@example.com", state="MA",
+            city="Boston", rating=4.7, active=True,
+        )
+
+        class FakeCalendar:
+            def __init__(self):
+                self.replacements = []
+
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.replacements.append((event_id, attendee_email, description))
+                return event_id
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                response = Client().post(
+                    f"/shoots/{shoot.id}/manual-send/",
+                    data={
+                        "videographer_id": str(out_of_state.id),
+                        "notes": "Updated instructions for the out-of-state videographer.",
+                        "action": "send",
+                    },
+                )
+
+        shoot.refresh_from_db()
+        first_invite.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(shoot.notes, "Updated instructions for the out-of-state videographer.")
+        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(fake_calendar.replacements[0][1], "outofstate@example.com")
+
+    def test_manual_send_can_save_notes_without_sending(self):
+        shoot, first_invite, _second_invite = self._shoot_with_invites()
+
+        response = Client().post(
+            f"/shoots/{shoot.id}/manual-send/",
+            data={"notes": "Bring a second camera body.", "action": "save_notes"},
+        )
+
+        shoot.refresh_from_db()
+        first_invite.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(shoot.notes, "Bring a second camera body.")
+        self.assertEqual(first_invite.status, "pending")
+        self.assertEqual(first_invite.google_event_id, "event-123")
+
+    def test_manual_send_search_displays_all_active_videographers(self):
+        shoot, _first_invite, _second_invite = self._shoot_with_invites()
+        out_of_state = Videographer.objects.create(
+            name="Boston Search Result", email="boston@example.com", state="MA",
+            city="Boston", rating=4.7, active=True,
+        )
+
+        response = Client().get(f"/shoots/{shoot.id}/")
+
+        self.assertContains(response, "videographer-search")
+        self.assertContains(response, "Boston Search Result")
+        self.assertContains(response, out_of_state.email)
