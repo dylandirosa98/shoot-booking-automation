@@ -1,5 +1,6 @@
 import base64
 import json
+from html import escape
 import logging
 from datetime import datetime
 from django.conf import settings
@@ -223,7 +224,7 @@ def shoot_detail(request, shoot_id):
         videographer.manual_invite_status = existing.status if existing else "not_queued"
         videographer.manual_send_disabled = bool(
             existing and (
-                existing.status in {"accepted", "declined", "expired"}
+                existing.status in {"accepted", "expired"}
                 or (existing.status == "pending" and existing.google_event_id)
             )
         )
@@ -251,7 +252,7 @@ def shoot_detail(request, shoot_id):
 @require_POST
 def manual_send(request, shoot_id):
     shoot = get_object_or_404(Shoot, id=shoot_id)
-    notes = request.POST.get("notes")
+    notes = _invite_notes_from_post(request)
     if notes is not None:
         shoot.notes = notes.strip()
         shoot.save(update_fields=["notes"])
@@ -277,6 +278,42 @@ def manual_send(request, shoot_id):
     except ValueError as exc:
         messages.error(request, str(exc))
     return redirect("shoot_detail", shoot_id=shoot.id)
+
+
+def _invite_notes_from_post(request) -> str | None:
+    """Build the invite notes from the selected shoot-description template."""
+    description_type = request.POST.get("shoot_description_type")
+    if description_type not in {"individual", "full_game", "custom"}:
+        return request.POST.get("notes")
+    if description_type == "custom":
+        return request.POST.get("notes", "")
+
+    if description_type == "individual":
+        fields = [
+            ("For", request.POST.get("individual_for", "")),
+            ("Location", request.POST.get("individual_location", "")),
+            ("Shoot type", "Individual Video"),
+            ("Player info", request.POST.get("individual_player_info", "")),
+            ("Rink", request.POST.get("individual_rink", "")),
+            ("Requirements", request.POST.get("individual_requirements", "")),
+            ("Specific requests", request.POST.get("individual_requests", "")),
+        ]
+    else:
+        fields = [
+            ("For", request.POST.get("full_game_for", "")),
+            ("Location", request.POST.get("full_game_location", "")),
+            ("Shoot type", "Full game video"),
+            ("Team Info", request.POST.get("full_game_team_info", "")),
+            ("Rink", request.POST.get("full_game_rink", "")),
+            ("Requirements", request.POST.get("full_game_requirements", "")),
+            ("Specific requests", request.POST.get("full_game_requests", "")),
+        ]
+
+    return "\n\n".join(
+        f"<strong>{escape(label)}:</strong> {escape(value.strip())}"
+        for label, value in fields
+        if value.strip()
+    )
 
 
 @require_POST

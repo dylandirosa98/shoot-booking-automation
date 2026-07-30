@@ -568,7 +568,7 @@ def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Inv
         event_id = current.google_event_id if current else None
 
         existing = next((invite for invite in invites if invite.videographer_id == videographer.id), None)
-        if existing and existing.status in {"accepted", "declined", "expired"}:
+        if existing and existing.status in {"accepted", "expired"}:
             raise ValueError("That videographer already has a completed invite for this shoot.")
         if existing and existing == current:
             raise ValueError("That videographer is already the active invitee.")
@@ -580,6 +580,10 @@ def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Inv
 
         if existing:
             selected = existing
+            if selected.status == "declined":
+                selected.status = "pending"
+                selected.responded_at = None
+                selected.save(update_fields=["status", "responded_at"])
         else:
             cfg = SchedulingSettings.get()
             drive_miles = None

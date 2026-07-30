@@ -97,9 +97,33 @@
                 <p id="videographer-search-empty" class="hidden mt-1 text-xs text-rose-600">No active videographers match that search.</p>
             </div>
             <div>
-                <label for="invite-notes" class="block text-xs font-medium text-slate-600 mb-1">Notes sent with invite</label>
+                <label for="shoot-description-type" class="block text-xs font-medium text-slate-600 mb-1">Shoot description</label>
+                <select id="shoot-description-type" name="shoot_description_type" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+                    <option value="custom" selected>Custom</option>
+                    <option value="individual">Individual video</option>
+                    <option value="full_game">Full Game Video</option>
+                </select>
+                <p class="mt-1 text-xs text-slate-500">Filled fields are included in the Calendar invite with bold labels.</p>
+            </div>
+            <div data-description-template="custom">
+                <label for="invite-notes" class="block text-xs font-medium text-slate-600 mb-1">Custom notes</label>
                 <textarea id="invite-notes" name="notes" rows="5" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Add shoot details, contact information, or special instructions.">{{ shoot.notes }}</textarea>
-                <p class="mt-1 text-xs text-slate-500">These notes are included in the Calendar invite and saved to this shoot.</p>
+            </div>
+            <div data-description-template="individual" class="hidden space-y-3">
+                <div><label for="individual-for" class="block text-xs font-medium text-slate-600 mb-1">For</label><input id="individual-for" name="individual_for" class="description-videographer-name w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></div>
+                <div><label for="individual-location" class="block text-xs font-medium text-slate-600 mb-1">Location</label><input id="individual-location" name="individual_location" value="{{ shoot.location }}" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></div>
+                <div><label for="individual-player-info" class="block text-xs font-medium text-slate-600 mb-1">Player info</label><textarea id="individual-player-info" name="individual_player_info" rows="3" placeholder="Player name and #, team name, jersey color, position, and descriptive gear details" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></textarea></div>
+                <div><label for="individual-rink" class="block text-xs font-medium text-slate-600 mb-1">Rink</label><input id="individual-rink" name="individual_rink" placeholder="Rink number, when applicable" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></div>
+                <div><label for="individual-requirements" class="block text-xs font-medium text-slate-600 mb-1">Requirements</label><textarea id="individual-requirements" name="individual_requirements" rows="6" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">Record (Player name and #) full shifts, keeping the camera framed on them throughout each play. If they pass the puck, take a shot, or create a play, follow the play briefly to capture the result before panning back over to them. Stay aware of where they are at and be prepared to record at all times, ensuring no game action is missed. (For example, if there's a mid play line change the camera should be on them recording before they even hop the bench)</textarea></div>
+                <div><label for="individual-requests" class="block text-xs font-medium text-slate-600 mb-1">Specific requests</label><textarea id="individual-requests" name="individual_requests" rows="5" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">Record closeup b-roll prior to faceoffs in the near side zone, between whistles ONLY (not during the play). Follow all videographer manual instructions, ensure settings are correct, no flat or Log color profiles. Should be shooting at 4k 60fps.</textarea></div>
+            </div>
+            <div data-description-template="full_game" class="hidden space-y-3">
+                <div><label for="full-game-for" class="block text-xs font-medium text-slate-600 mb-1">For</label><input id="full-game-for" name="full_game_for" class="description-videographer-name w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></div>
+                <div><label for="full-game-location" class="block text-xs font-medium text-slate-600 mb-1">Location</label><input id="full-game-location" name="full_game_location" value="{{ shoot.location }}" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></div>
+                <div><label for="full-game-team-info" class="block text-xs font-medium text-slate-600 mb-1">Team Info</label><textarea id="full-game-team-info" name="full_game_team_info" rows="3" placeholder="Team name, age group, level, jersey colors/descriptors, and opponent" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></textarea></div>
+                <div><label for="full-game-rink" class="block text-xs font-medium text-slate-600 mb-1">Rink</label><input id="full-game-rink" name="full_game_rink" placeholder="Rink number, when applicable" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"></div>
+                <div><label for="full-game-requirements" class="block text-xs font-medium text-slate-600 mb-1">Requirements</label><textarea id="full-game-requirements" name="full_game_requirements" rows="6" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">Record the full game, following the puck/play from whistle to whistle. Stop your recording between whistles, but ensure no gameplay is missed. Every clip should start 2-3 seconds before the puck is dropped, and all clips should end with a whistle (unless there is a goal or great save, then focus on the celebrations or reactions and stop your recording after that).</textarea></div>
+                <div><label for="full-game-requests" class="block text-xs font-medium text-slate-600 mb-1">Specific requests</label><textarea id="full-game-requests" name="full_game_requests" rows="5" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">Record warmup b-roll if possible, otherwise, record closeup b-roll prior to faceoffs in the near side zone, between whistles (not during the play) to be used for a hype reel. Follow all videographer manual instructions, ensure settings are correct, no flat or Log color profiles. Should be shooting in 4k 60fps.</textarea></div>
             </div>
             <div class="flex flex-wrap gap-3">
                 <button name="action" value="save_notes" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-sm font-semibold">Save Notes</button>
@@ -207,9 +231,27 @@
     </div>
 </div>
 <script>
+    const descriptionType = document.getElementById('shoot-description-type');
+    const descriptionTemplates = document.querySelectorAll('[data-description-template]');
+    const setDescriptionTemplate = () => {
+        descriptionTemplates.forEach((template) => {
+            template.classList.toggle('hidden', template.dataset.descriptionTemplate !== descriptionType.value);
+        });
+    };
+    if (descriptionType) {
+        descriptionType.addEventListener('change', setDescriptionTemplate);
+        setDescriptionTemplate();
+    }
+
     const videographerSearch = document.getElementById('videographer-search');
     const videographerSelect = document.getElementById('videographer-id');
     const noVideographerMatches = document.getElementById('videographer-search-empty');
+    const setDescriptionVideographerName = () => {
+        const name = videographerSelect.selectedOptions[0]?.text.split(' · ')[0] || '';
+        document.querySelectorAll('.description-videographer-name').forEach((input) => {
+            if (!input.value) input.value = name;
+        });
+    };
     if (videographerSearch && videographerSelect && noVideographerMatches) {
         const videographerOptions = Array.from(videographerSelect.options);
         const filterVideographers = () => {
@@ -228,6 +270,7 @@
             noVideographerMatches.classList.toggle('hidden', matches > 0);
         };
         videographerSearch.addEventListener('input', filterVideographers);
+        videographerSelect.addEventListener('change', setDescriptionVideographerName);
     }
 
     document.querySelectorAll('.move-up').forEach((button) => {

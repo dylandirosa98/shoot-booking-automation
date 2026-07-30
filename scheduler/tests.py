@@ -720,6 +720,66 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(first_invite.status, "pending")
         self.assertEqual(first_invite.google_event_id, "event-123")
 
+    def test_manual_send_can_reoffer_to_a_videographer_who_declined(self):
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        first_invite.status = "declined"
+        first_invite.responded_at = timezone.now()
+        first_invite.save(update_fields=["status", "responded_at"])
+        second_invite.google_event_id = "event-456"
+        second_invite.save(update_fields=["google_event_id"])
+
+        class FakeCalendar:
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.replacement = (event_id, attendee_email)
+                return event_id
+
+        fake_calendar = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=fake_calendar):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                response = Client().post(
+                    f"/shoots/{shoot.id}/manual-send/",
+                    data={"videographer_id": str(first_invite.videographer_id), "action": "send"},
+                )
+
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(first_invite.status, "pending")
+        self.assertIsNone(first_invite.responded_at)
+        self.assertEqual(first_invite.google_event_id, "event-456")
+        self.assertEqual(second_invite.status, "declined")
+        self.assertEqual(fake_calendar.replacement, ("event-456", "first@example.com"))
+
+    def test_structured_individual_notes_include_only_filled_fields(self):
+        shoot, _first_invite, _second_invite = self._shoot_with_invites()
+
+        response = Client().post(
+            f"/shoots/{shoot.id}/manual-send/",
+            data={
+                "action": "save_notes",
+                "shoot_description_type": "individual",
+                "individual_for": "Video Person",
+                "individual_location": "North Shore Ice Arena, 123 Main St",
+                "individual_player_info": "",
+                "individual_rink": "2",
+                "individual_requirements": "Record (Player name and #) full shifts.",
+                "individual_requests": "",
+            },
+        )
+
+        shoot.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            shoot.notes,
+            "<strong>For:</strong> Video Person\n\n"
+            "<strong>Location:</strong> North Shore Ice Arena, 123 Main St\n\n"
+            "<strong>Shoot type:</strong> Individual Video\n\n"
+            "<strong>Rink:</strong> 2\n\n"
+            "<strong>Requirements:</strong> Record (Player name and #) full shifts.",
+        )
+        self.assertNotIn("Player info", shoot.notes)
+        self.assertNotIn("Specific requests", shoot.notes)
+
     def test_manual_send_search_displays_all_active_videographers(self):
         shoot, _first_invite, _second_invite = self._shoot_with_invites()
         out_of_state = Videographer.objects.create(
