@@ -78,7 +78,11 @@
                         {% if shoot.status == "confirmed" %}
                             <span class="inline-block px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-medium">Confirmed</span>
                         {% elif shoot.status == "pending" %}
-                            <span class="inline-block px-2 py-1 rounded-md bg-amber-100 text-amber-700 text-xs font-medium">Pending</span>
+                            {% if shoot.current_invitee %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-amber-100 text-amber-700 text-xs font-medium">Awaiting reply</span>
+                            {% else %}
+                            <span class="inline-block px-2 py-1 rounded-md bg-rose-100 text-rose-700 text-xs font-medium">Needs booking</span>
+                            {% endif %}
                         {% elif shoot.status == "failed" %}
                             <span class="inline-block px-2 py-1 rounded-md bg-rose-100 text-rose-700 text-xs font-medium">Failed</span>
                         {% else %}
@@ -124,7 +128,7 @@
                             </details>
                             {% endif %}
                         {% else %}
-                            <span class="text-slate-400">—</span>
+                            <a href="{% url 'shoot_detail' shoot.id %}" class="text-xs font-medium text-rose-600 hover:text-rose-700">Book videographer</a>
                         {% endif %}
                     </td>
                 </tr>

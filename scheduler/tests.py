@@ -274,6 +274,7 @@ class VideographerEscalationTests(TestCase):
             shoot_datetime=timezone.now() + timedelta(days=5),
             duration_minutes=120,
             status="pending",
+            queue_enabled=True,
         )
         first_invite = Invite.objects.create(
             shoot=shoot,
@@ -366,7 +367,7 @@ class VideographerEscalationTests(TestCase):
         first_invite.refresh_from_db()
         second_invite.refresh_from_db()
         third_invite.refresh_from_db()
-        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(first_invite.status, "cancelled")
         self.assertEqual(first_invite.rank, 0)
         self.assertEqual(third_invite.status, "pending")
         self.assertEqual(third_invite.rank, 1)
@@ -417,7 +418,7 @@ class VideographerEscalationTests(TestCase):
 
         self.assertEqual(shoot.status, "pending")
         self.assertIsNone(shoot.confirmed_videographer)
-        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(first_invite.status, "cancelled")
         self.assertIsNotNone(first_invite.responded_at)
         self.assertEqual(first_invite.google_event_id, "event-123")
         self.assertEqual(third_invite.status, "pending")
@@ -485,7 +486,7 @@ class VideographerEscalationTests(TestCase):
         second_invite.refresh_from_db()
         third_invite.refresh_from_db()
         fourth_invite.refresh_from_db()
-        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(first_invite.status, "cancelled")
         self.assertEqual(third_invite.status, "declined")
         self.assertEqual(second_invite.status, "pending")
         self.assertEqual(second_invite.google_event_id, "event-123")
@@ -702,7 +703,7 @@ class VideographerEscalationTests(TestCase):
         first_invite.refresh_from_db()
         self.assertEqual(response.status_code, 302)
         self.assertEqual(shoot.notes, "Updated instructions for the out-of-state videographer.")
-        self.assertEqual(first_invite.status, "declined")
+        self.assertEqual(first_invite.status, "cancelled")
         self.assertEqual(fake_calendar.replacements[0][1], "outofstate@example.com")
 
     def test_manual_send_can_save_notes_without_sending(self):
@@ -779,6 +780,48 @@ class VideographerEscalationTests(TestCase):
         )
         self.assertNotIn("Player info", shoot.notes)
         self.assertNotIn("Specific requests", shoot.notes)
+
+    def test_deadline_without_manual_queue_notifies_without_replacing_invite(self):
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        shoot.queue_enabled = False
+        shoot.save(update_fields=["queue_enabled"])
+
+        class FakeCalendar:
+            def get_attendee_status(self, event_id, attendee_email):
+                return "needsAction"
+
+        with patch("scheduler.orchestrator.get_client", return_value=FakeCalendar()):
+            with patch("scheduler.orchestrator.notify.booking_needed") as booking_needed:
+                check_and_escalate(first_invite.id)
+
+        first_invite.refresh_from_db()
+        second_invite.refresh_from_db()
+        self.assertEqual(first_invite.status, "pending")
+        self.assertEqual(first_invite.google_event_id, "event-123")
+        self.assertIsNotNone(first_invite.deadline_notified_at)
+        self.assertEqual(second_invite.google_event_id, "")
+        booking_needed.assert_called_once()
+
+    def test_adding_manual_queue_member_sets_wait_time_and_does_not_send(self):
+        shoot, _first_invite, _second_invite = self._shoot_with_invites()
+        shoot.invites.all().delete()
+        shoot.queue_enabled = False
+        shoot.save(update_fields=["queue_enabled"])
+        videographer = Videographer.objects.create(
+            name="Queued Video", email="queued@example.com", state="MI", rating=4.6, active=True,
+        )
+
+        response = Client().post(
+            f"/shoots/{shoot.id}/queue/add/",
+            data={"videographer_id": str(videographer.id), "wait_hours": "12"},
+        )
+
+        invite = Invite.objects.get(shoot=shoot, videographer=videographer)
+        shoot.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(shoot.queue_enabled)
+        self.assertEqual(invite.queue_wait_hours, 12)
+        self.assertEqual(invite.google_event_id, "")
 
     def test_manual_send_search_displays_all_active_videographers(self):
         shoot, _first_invite, _second_invite = self._shoot_with_invites()

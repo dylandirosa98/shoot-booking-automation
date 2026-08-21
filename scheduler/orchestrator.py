@@ -168,6 +168,8 @@ def handle_updated_shoot(
                 existing.id, existing.status,
             )
         existing.save()
+        if location_changed or time_changed:
+            notify.booking_needed(existing, "A confirmed shoot's date, time, or location changed in Pipedrive. Confirm the change with its videographer.")
         return existing, "confirmed_warning" if (location_changed or time_changed) else "noop"
 
     # Still pending - if nothing material changed, just save the patch and move on
@@ -175,21 +177,8 @@ def handle_updated_shoot(
         existing.save()
         return existing, "updated_in_place"
 
-    # Material change while pending → cancel pending invites + restart the ranking
-    logger.info(
-        "Shoot %s changed (location_changed=%s, time_changed=%s) while pending; restarting invite chain",
-        existing.id, location_changed, time_changed,
-    )
-
-    cal = get_client()
-    for inv in existing.invites.all():
-        if inv.status == "pending" and inv.google_event_id:
-            cal.cancel_event(inv.google_event_id)
-        if inv.status == "pending":
-            inv.status = "cancelled"
-            inv.save(update_fields=["status"])
-
-    # Update shoot with new info, redo geocoding + ranking (with fallback cascade)
+    # A Pipedrive change must never pull back a live invite. Update the shoot and
+    # let the owner decide whether to manually send updated details elsewhere.
     if prefilled_lat is not None and prefilled_lng is not None:
         lat, lng = prefilled_lat, prefilled_lng
     else:
@@ -197,9 +186,9 @@ def handle_updated_shoot(
             _geocode_candidates(location, location_city, location_street, prefilled_state)
         )
         if not result:
-            existing.status = "failed"
             existing.save()
-            return existing, "noop"
+            notify.booking_needed(existing, "The shoot changed in Pipedrive, but its updated location could not be geocoded.")
+            return existing, "updated_in_place"
         (lat, lng), _used = result
     state = prefilled_state or _state_from_location(location)
 
@@ -207,30 +196,9 @@ def handle_updated_shoot(
     existing.lat = lat
     existing.lng = lng
     existing.shoot_datetime = shoot_datetime
-    existing.status = "pending"
     existing.save()
-
-    ranked = rank_for_shoot(lat, lng, shoot_state=state)
-    if not ranked:
-        existing.status = "failed"
-        existing.save(update_fields=["status"])
-        return existing, "noop"
-
-    cfg = SchedulingSettings.get()
-    expires = timezone.now() + timedelta(hours=cfg.escalation_hours)
-
-    # Wipe and recreate the invite chain so ranks reflect the new location
-    existing.invites.exclude(status__in=["accepted"]).delete()
-    for rank, scored in enumerate(ranked):
-        Invite.objects.create(
-            shoot=existing, videographer=scored.videographer, rank=rank,
-            score=scored.score, drive_miles=scored.drive_miles,
-            drive_minutes=scored.drive_minutes, status="pending",
-            expires_at=expires if rank == 0 else timezone.now(),
-        )
-
-    _send_invite(existing, rank=0)
-    return existing, "restarted"
+    notify.booking_needed(existing, "A pending shoot's date, time, or location changed in Pipedrive. Review its active invite before making another send.")
+    return existing, "updated_in_place"
 
 
 def handle_deleted_shoot(pipedrive_activity_id: str | None = None,
@@ -366,27 +334,14 @@ def handle_new_shoot(
         notes=notes, status="pending",
     )
 
-    # Rank
+    # Rankings are suggestions only. A new shoot creates neither a queue nor a
+    # Calendar invite; the owner decides who to contact from the detail page.
     ranked = rank_for_shoot(lat, lng, shoot_state=state)
     if not ranked:
         logger.warning("No eligible videographers for shoot %s", shoot.id)
-        shoot.status = "failed"
-        shoot.save(update_fields=["status"])
-        notify.shoot_failed(shoot)
+        notify.booking_needed(shoot, "A new shoot arrived with no ranked videographer suggestions.")
         return shoot
-
-    # Save all invites as records (rank 0..N) but only send to #0
-    cfg = SchedulingSettings.get()
-    expires = timezone.now() + timedelta(hours=cfg.escalation_hours)
-    for rank, scored in enumerate(ranked):
-        Invite.objects.create(
-            shoot=shoot, videographer=scored.videographer, rank=rank,
-            score=scored.score, drive_miles=scored.drive_miles,
-            drive_minutes=scored.drive_minutes, status="pending",
-            expires_at=expires if rank == 0 else timezone.now(),
-        )
-
-    _send_invite(shoot, rank=0)
+    notify.booking_needed(shoot, "A new shoot arrived and needs a videographer booked manually.")
     return shoot
 
 
@@ -422,13 +377,13 @@ def _send_invite(shoot: Shoot, rank: int, reuse_event_id: str | None = None) -> 
         logger.exception("Calendar invite send failed for invite %s", invite.id)
         return None
 
-    cfg = SchedulingSettings.get()
     invite.google_event_id = event_id
-    invite.expires_at = timezone.now() + timedelta(hours=cfg.escalation_hours)
+    invite.expires_at = timezone.now() + timedelta(hours=invite.queue_wait_hours)
     invite.calendar_error = ""
     invite.calendar_last_attempt_at = timezone.now()
+    invite.deadline_notified_at = None
     invite.save(update_fields=[
-        "google_event_id", "expires_at", "calendar_error", "calendar_last_attempt_at",
+        "google_event_id", "expires_at", "calendar_error", "calendar_last_attempt_at", "deadline_notified_at",
     ])
 
     # Schedule the escalation check
@@ -442,8 +397,8 @@ def _send_invite(shoot: Shoot, rank: int, reuse_event_id: str | None = None) -> 
 
 def check_and_escalate(invite_id: int) -> None:
     """
-    Runs when an invite's 24h window expires. If still pending, mark
-    expired and send to the next rank.
+    Runs when an invite's deadline passes. Unqueued invites remain active and
+    notify the owner; an enabled manual queue progresses to its next member.
     """
     try:
         invite = Invite.objects.select_related("shoot", "videographer").get(id=invite_id)
@@ -462,8 +417,12 @@ def check_and_escalate(invite_id: int) -> None:
         _mark_accepted(invite)
         return
 
-    # Otherwise expire + move the same calendar event to the next videographer.
-    _move_event_to_next_invite(invite, cal, "declined" if status == "declined" else "expired")
+    if status == "declined":
+        _handle_decline(invite, cal)
+    elif invite.shoot.queue_enabled and _next_available_invite(invite.shoot, invite.rank):
+        _move_event_to_next_invite(invite, cal, "expired")
+    else:
+        _notify_deadline(invite)
 
 
 def poll_all_pending_invites() -> None:
@@ -484,10 +443,10 @@ def poll_all_pending_invites() -> None:
     """
     now = timezone.now()
     # A failed Calendar create has no event ID, so it is invisible to the
-    # response-status poll below. Retry only the first unsent pending invite
-    # per shoot; later ranks remain queued until it is resolved.
+    # response-status poll below. Only retry records with an actual failure;
+    # normal unsent manual-queue entries must never be sent by the poller.
     unsent_invites = (Invite.objects
-                      .filter(status="pending", google_event_id="", shoot__status="pending",
+                      .filter(status="pending", google_event_id="", calendar_error__gt="", shoot__status="pending",
                               shoot__shoot_datetime__gte=now)
                       .select_related("shoot")
                       .order_by("shoot_id", "rank"))
@@ -526,8 +485,10 @@ def poll_all_pending_invites() -> None:
                 logger.info("poll: invite %s ACCEPTED by %s", invite.id, invite.videographer.email)
                 _mark_accepted(invite)
             elif status == "declined":
-                logger.info("poll: invite %s DECLINED by %s, escalating", invite.id, invite.videographer.email)
-                _decline_and_escalate(invite, cal)
+                logger.info("poll: invite %s DECLINED by %s", invite.id, invite.videographer.email)
+                _handle_decline(invite, cal)
+            elif timezone.now() >= invite.expires_at:
+                check_and_escalate(invite.id)
 
         # --- Accepted invite paths (watch for reversals) ---
         elif invite.status == "accepted":
@@ -542,9 +503,29 @@ def poll_all_pending_invites() -> None:
                 _ensure_drive_folder_shared(invite)
 
 
-def _decline_and_escalate(invite: Invite, cal) -> None:
-    """Mark invite declined and move the same calendar event to the next available person."""
-    _move_event_to_next_invite(invite, cal, "declined")
+def _notify_deadline(invite: Invite) -> None:
+    if invite.deadline_notified_at:
+        return
+    invite.deadline_notified_at = timezone.now()
+    invite.save(update_fields=["deadline_notified_at"])
+    notify.booking_needed(
+        invite.shoot,
+        f"{invite.videographer.name} has not responded by their {invite.queue_wait_hours}-hour booking deadline. Their Calendar invite remains active until you send it to someone else.",
+    )
+
+
+def _handle_decline(invite: Invite, cal) -> None:
+    """Progress only an explicitly enabled queue; otherwise leave the event alone."""
+    if invite.shoot.queue_enabled and _next_available_invite(invite.shoot, invite.rank):
+        _move_event_to_next_invite(invite, cal, "declined")
+        return
+    invite.status = "declined"
+    invite.responded_at = timezone.now()
+    invite.save(update_fields=["status", "responded_at"])
+    notify.booking_needed(
+        invite.shoot,
+        f"{invite.videographer.name} declined the shoot. Their Calendar invite remains in place until you manually send it to someone else.",
+    )
 
 
 def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Invite:
@@ -561,8 +542,12 @@ def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Inv
             .order_by("rank", "id")
         )
 
+        # A decline and an unanswered deadline deliberately leave the event on
+        # the original calendar. Treat either as current until a manual send
+        # explicitly replaces that attendee.
         current = next(
-            (invite for invite in invites if invite.status == "pending" and invite.google_event_id),
+            (invite for invite in reversed(invites)
+             if invite.google_event_id and invite.status in {"pending", "declined", "expired"}),
             None,
         )
         event_id = current.google_event_id if current else None
@@ -570,11 +555,13 @@ def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Inv
         existing = next((invite for invite in invites if invite.videographer_id == videographer.id), None)
         if existing and existing.status in {"accepted", "expired"}:
             raise ValueError("That videographer already has a completed invite for this shoot.")
-        if existing and existing == current:
+        if existing and existing == current and existing.status == "pending":
             raise ValueError("That videographer is already the active invitee.")
 
-        if current:
-            current.status = "declined"
+        if current and current != existing:
+            # The event is only removed from their calendar because another
+            # person is being sent it now, not because a deadline elapsed.
+            current.status = "cancelled"
             current.responded_at = timezone.now()
             current.save(update_fields=["status", "responded_at"])
 
@@ -606,7 +593,7 @@ def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Inv
 
         completed_before = [
             invite for invite in invites
-            if invite.id != selected.id and invite.status in {"declined", "expired", "accepted"}
+            if invite.id != selected.id and invite.status in {"declined", "expired", "accepted", "cancelled"}
         ]
         active_position = len(completed_before)
         queued_after = [
@@ -626,7 +613,35 @@ def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Inv
     return _send_invite(shoot, rank=active_position, reuse_event_id=event_id)
 
 
-def reorder_queued_invites(shoot: Shoot, invite_ids: list[int]) -> None:
+def add_to_manual_queue(shoot: Shoot, videographer: Videographer, wait_hours: int) -> Invite:
+    """Add a person to the opt-in queue without sending them an invite yet."""
+    with transaction.atomic():
+        shoot = Shoot.objects.select_for_update().get(id=shoot.id)
+        existing = Invite.objects.filter(shoot=shoot, videographer=videographer).first()
+        if existing:
+            raise ValueError("That videographer is already in this shoot's invite history or queue.")
+        drive_miles = drive_minutes = None
+        score = videographer.rating
+        if shoot.lat is not None and shoot.lng is not None and videographer.lat is not None and videographer.lng is not None:
+            drive_miles, drive_minutes = estimate_drive(shoot.lat, shoot.lng, videographer.lat, videographer.lng)
+            score = videographer.rating - (drive_minutes * SchedulingSettings.get().score_penalty_per_minute)
+        invite = Invite.objects.create(
+            shoot=shoot,
+            videographer=videographer,
+            rank=shoot.invites.count(),
+            score=score,
+            drive_miles=drive_miles,
+            drive_minutes=drive_minutes,
+            status="pending",
+            expires_at=timezone.now(),
+            queue_wait_hours=wait_hours,
+        )
+        shoot.queue_enabled = True
+        shoot.save(update_fields=["queue_enabled"])
+        return invite
+
+
+def reorder_queued_invites(shoot: Shoot, invite_ids: list[int], wait_hours: dict[int, int] | None = None) -> None:
     """
     Reorder only unsent queued invites. Sent history and the active invite stay
     fixed so the audit trail remains readable.
@@ -656,6 +671,9 @@ def reorder_queued_invites(shoot: Shoot, invite_ids: list[int]) -> None:
             if invite.rank != rank:
                 invite.rank = rank
                 invite.save(update_fields=["rank"])
+            if wait_hours and invite.id in wait_hours and invite.queue_wait_hours != wait_hours[invite.id]:
+                invite.queue_wait_hours = wait_hours[invite.id]
+                invite.save(update_fields=["queue_wait_hours"])
 
 
 def _move_event_to_next_invite(invite: Invite, cal, final_status: str) -> Invite | None:
@@ -667,12 +685,7 @@ def _move_event_to_next_invite(invite: Invite, cal, final_status: str) -> Invite
     if next_invite:
         return _send_invite(invite.shoot, rank=next_invite.rank, reuse_event_id=invite.google_event_id)
 
-    if invite.google_event_id:
-        cal.cancel_event(invite.google_event_id)
-    invite.shoot.status = "failed"
-    invite.shoot.save(update_fields=["status"])
-    logger.warning("exhausted all videographers for shoot %s", invite.shoot.id)
-    notify.shoot_failed(invite.shoot)
+    notify.booking_needed(invite.shoot, "The manual queue has no one else to contact. Choose the next videographer manually.")
     return None
 
 
@@ -693,35 +706,25 @@ def _handle_post_acceptance_decline(invite: Invite, cal) -> None:
     shoot.confirmed_videographer = None
     shoot.save(update_fields=["status", "confirmed_videographer"])
 
-    # Find the next person to ask and move the same calendar event forward.
-    next_invite = _next_available_invite(shoot, after_rank=invite.rank)
+    # Only an opted-in queue may advance automatically after an acceptance reversal.
+    next_invite = _next_available_invite(shoot, after_rank=invite.rank) if shoot.queue_enabled else None
     if next_invite:
         _send_invite(shoot, rank=next_invite.rank, reuse_event_id=invite.google_event_id)
     else:
-        if invite.google_event_id:
-            cal.cancel_event(invite.google_event_id)
-        shoot.status = "failed"
-        shoot.save(update_fields=["status"])
-        logger.warning("post-acceptance decline: no fallback available for shoot %s", shoot.id)
-        notify.shoot_failed(shoot)
+        notify.booking_needed(shoot, f"{invite.videographer.name} withdrew after accepting. Choose the next videographer manually.")
 
 
 def _next_available_invite(shoot: Shoot, after_rank: int) -> Invite | None:
     """
     Find the lowest-rank invite that hasn't already declined / accepted-and-bailed.
-    Looks at ranks > after_rank first, then wraps to cancelled invites at any rank
-    that weren't already explicitly declined.
+    Looks only at the remaining pending manual-queue entries. Previously sent
+    invites are never re-offered automatically.
     """
     # First: try the next rank in the chain
     n = shoot.invites.filter(rank__gt=after_rank).order_by("rank").first()
     if n and n.status in {"pending", "cancelled"}:
         return n
-    # Otherwise: re-offer to anyone we previously cancelled (they never got asked)
-    return (shoot.invites
-            .filter(status="cancelled")
-            .exclude(rank=after_rank)
-            .order_by("rank")
-            .first())
+    return None
 
 
 def _mark_accepted(invite: Invite) -> None:

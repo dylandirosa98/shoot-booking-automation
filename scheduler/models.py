@@ -184,6 +184,10 @@ class Shoot(models.Model):
     google_drive_folder_url = models.URLField(blank=True)
     google_drive_error = models.TextField(blank=True)
     notes = models.TextField(blank=True)
+    queue_enabled = models.BooleanField(
+        default=False,
+        help_text="Automatically progress a manually created queue after each member's deadline.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -259,6 +263,8 @@ class Invite(models.Model):
     sent_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     responded_at = models.DateTimeField(null=True, blank=True)
+    queue_wait_hours = models.PositiveIntegerField(default=24)
+    deadline_notified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["shoot", "rank"]

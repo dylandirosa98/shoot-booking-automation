@@ -15,9 +15,10 @@ from .models import Editor, EditJob, Videographer, Shoot, Invite, SchedulingSett
 from .orchestrator import (
     handle_new_shoot, handle_updated_shoot, handle_deleted_shoot,
     check_and_escalate, _mark_accepted, _state_from_location,
-    manual_send_to_videographer, reorder_queued_invites,
+    manual_send_to_videographer, add_to_manual_queue, reorder_queued_invites,
 )
 from .editing import handle_deleted_edit_job, handle_new_edit_job, handle_updated_edit_job
+from .scoring import rank_for_shoot
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +132,8 @@ def dashboard(request):
     # Annotate each shoot with its current invitee + prior invite history
     for s in shoots:
         sent = list(s.invites.exclude(google_event_id="").order_by("rank"))
-        s.current_invitee = sent[-1] if sent else None
-        s.prior_invitees = sent[:-1] if len(sent) > 1 else []
+        s.current_invitee = next((invite for invite in reversed(sent) if invite.status == "pending"), None)
+        s.prior_invitees = [invite for invite in sent if invite != s.current_invitee]
 
     return render(request, "dashboard.html", {
         "by_state": by_state,
@@ -211,6 +212,7 @@ def shoot_detail(request, shoot_id):
     )
     invites = list(shoot.invites.all().order_by("rank"))
     shoot_state = _state_from_location(shoot.location)
+    ranked_suggestions = rank_for_shoot(shoot.lat, shoot.lng, shoot_state=shoot_state) if shoot.lat is not None and shoot.lng is not None else []
 
     # Manual sends intentionally allow the entire active roster. Service state
     # is still shown in the UI as a useful reference, but is not a restriction.
@@ -246,6 +248,7 @@ def shoot_detail(request, shoot_id):
         "eligible_videographers": eligible_videographers,
         "reorderable_invites": reorderable_invites,
         "manual_send_available": manual_send_available,
+        "ranked_suggestions": ranked_suggestions,
     })
 
 
@@ -275,6 +278,25 @@ def manual_send(request, shoot_id):
     try:
         manual_send_to_videographer(shoot, videographer)
         messages.success(request, f"Manual invite sent to {videographer.name}.")
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    return redirect("shoot_detail", shoot_id=shoot.id)
+
+
+@require_POST
+def add_queue_invite(request, shoot_id):
+    shoot = get_object_or_404(Shoot, id=shoot_id)
+    videographer = get_object_or_404(Videographer, id=request.POST.get("videographer_id"), active=True)
+    try:
+        wait_hours = int(request.POST.get("wait_hours", "24"))
+        if not 1 <= wait_hours <= 168:
+            raise ValueError
+    except (TypeError, ValueError):
+        messages.error(request, "Queue wait time must be between 1 and 168 hours.")
+        return redirect("shoot_detail", shoot_id=shoot.id)
+    try:
+        add_to_manual_queue(shoot, videographer, wait_hours)
+        messages.success(request, f"Added {videographer.name} to the manual queue. Send to the first person when ready to start it.")
     except ValueError as exc:
         messages.error(request, str(exc))
     return redirect("shoot_detail", shoot_id=shoot.id)
@@ -327,8 +349,19 @@ def reorder_invites(request, shoot_id):
             messages.error(request, "Invite order contained an invalid row.")
             return redirect("shoot_detail", shoot_id=shoot.id)
 
+    wait_hours = {}
+    for invite_id in invite_ids:
+        try:
+            value = int(request.POST.get(f"wait_hours_{invite_id}", "24"))
+            if not 1 <= value <= 168:
+                raise ValueError
+            wait_hours[invite_id] = value
+        except (TypeError, ValueError):
+            messages.error(request, "Queue wait time must be between 1 and 168 hours.")
+            return redirect("shoot_detail", shoot_id=shoot.id)
+
     try:
-        reorder_queued_invites(shoot, invite_ids)
+        reorder_queued_invites(shoot, invite_ids, wait_hours)
         messages.success(request, "Queued invite order updated.")
     except ValueError as exc:
         messages.error(request, str(exc))
