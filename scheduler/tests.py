@@ -2,7 +2,7 @@ import json
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
 from .clickup_client import ClickUpTaskResult
@@ -596,6 +596,7 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(second_invite.google_event_id, "event-123")
         self.assertEqual(fake_calendar.replacements, [("event-123", "second@example.com")])
 
+    @override_settings(GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT=True)
     def test_accepted_invite_creates_and_shares_drive_folder_once(self):
         shoot, first_invite, _ = self._shoot_with_invites()
 
@@ -626,6 +627,27 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(fake_drive.created[0][1], shoot.id)
         self.assertTrue(fake_drive.created[0][0].startswith("Detroit, MI — "))
         self.assertEqual(fake_drive.shared, [("folder-123", "first@example.com")])
+
+    def test_accepted_invite_skips_drive_folder_when_disabled(self):
+        shoot, first_invite, _ = self._shoot_with_invites()
+
+        class FakeDrive:
+            def create_folder(self, *, name, shoot_id):
+                raise AssertionError("Drive folder creation should be disabled")
+
+            def share_folder(self, *, folder_id, email):
+                raise AssertionError("Drive folder sharing should be disabled")
+
+        with patch("scheduler.orchestrator.get_drive_client", return_value=FakeDrive()):
+            _mark_accepted(first_invite)
+
+        shoot.refresh_from_db()
+        first_invite.refresh_from_db()
+        self.assertEqual(shoot.status, "confirmed")
+        self.assertEqual(shoot.confirmed_videographer, first_invite.videographer)
+        self.assertEqual(shoot.google_drive_folder_id, "")
+        self.assertEqual(shoot.google_drive_folder_url, "")
+        self.assertEqual(first_invite.google_drive_permission_id, "")
 
     def test_failed_calendar_send_records_error_without_event(self):
         shoot, _first_invite, second_invite = self._shoot_with_invites()

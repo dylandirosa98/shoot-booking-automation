@@ -13,6 +13,7 @@ Flow:
 import logging
 import re
 from datetime import datetime, timedelta
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from .models import Videographer, Shoot, Invite, SchedulingSettings
@@ -63,6 +64,8 @@ def _drive_folder_name(shoot: Shoot) -> str:
 
 def _ensure_drive_folder_shared(invite: Invite) -> bool:
     """Create, persist, and share the confirmed shoot folder exactly once."""
+    if not settings.GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT:
+        return False
     try:
         with transaction.atomic():
             invite = (Invite.objects.select_for_update()

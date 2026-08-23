@@ -115,6 +115,11 @@ GOOGLE_OAUTH_REFRESH_TOKEN = os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN", "")
 GOOGLE_CALENDAR_OWNER_EMAIL = os.getenv("GOOGLE_CALENDAR_OWNER_EMAIL", "")
 # Optional destination folder. Leave blank to create shoot folders in My Drive.
 GOOGLE_DRIVE_PARENT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_PARENT_FOLDER_ID", "")
+# Auto-create/share a Drive folder when a videographer accepts a shoot.
+# Currently off. Set GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT=true to turn it back on.
+GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT = os.getenv(
+    "GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT", "false"
+).lower() == "true"
 
 PIPEDRIVE_WEBHOOK_SECRET = os.getenv("PIPEDRIVE_WEBHOOK_SECRET", "")
 PIPEDRIVE_API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN", "")
