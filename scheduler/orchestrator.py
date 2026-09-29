@@ -39,21 +39,21 @@ def _state_from_location(location: str) -> str | None:
     return None
 
 
-def _invite_message(shoot: Shoot, videographer: Videographer, miles: float, minutes: float) -> str:
-    first_name = videographer.name.split()[0] if videographer.name else "there"
-    sections = [
-        f"Hi {first_name},",
-        "You're our top pick for an upcoming hockey shoot. Details:",
-        (f"  Location: {shoot.location}\n"
-         f"  Distance: ~{miles:.0f} mi (~{minutes:.0f} min drive)"),
-    ]
-    if shoot.notes and shoot.notes.strip():
-        sections.append("Shoot details / notes from the team:\n" + shoot.notes.strip())
-    sections.append(
-        "Please accept or decline this calendar invite within 24 hours.\n"
-        "If we don't hear back, we'll offer it to the next videographer."
-    )
-    return "\n\n".join(sections)
+def _invite_message(shoot: Shoot) -> str:
+    """Calendar description shown in the invite email.
+
+    Google Calendar renders a small HTML subset, including <b>.
+    Notes are already HTML from the shoot-description templates, so they
+    are not escaped again.
+    """
+    sections = ["<b>Arrive 15-20 minutes before game time</b>"]
+    notes = (shoot.notes or "").strip()
+    if notes:
+        sections.append(
+            "Shoot details / notes from the team:<br>"
+            + notes.replace("\n", "<br>")
+        )
+    return "<br><br>".join(sections)
 
 
 def _drive_folder_name(shoot: Shoot) -> str:
@@ -354,7 +354,7 @@ def _send_invite(shoot: Shoot, rank: int, reuse_event_id: str | None = None) -> 
     if not invite:
         return None
 
-    description = _invite_message(shoot, invite.videographer, invite.drive_miles or 0, invite.drive_minutes or 0)
+    description = _invite_message(shoot)
     try:
         cal = get_client()
         if reuse_event_id:
