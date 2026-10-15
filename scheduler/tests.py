@@ -858,3 +858,365 @@ class VideographerEscalationTests(TestCase):
         self.assertContains(response, "Select a videographer")
         self.assertContains(response, "Boston Search Result")
         self.assertContains(response, out_of_state.email)
+
+
+def facebook_leadgen_payload(*, leadgen_id="444", page_id="111", form_id="222", ad_id="333"):
+    return {
+        "object": "page",
+        "entry": [{
+            "id": page_id,
+            "time": 1752105600,
+            "changes": [{
+                "field": "leadgen",
+                "value": {
+                    "leadgen_id": leadgen_id,
+                    "page_id": page_id,
+                    "form_id": form_id,
+                    "ad_id": ad_id,
+                    "adgroup_id": "555",
+                    "created_time": 1752105600,
+                },
+            }],
+        }],
+    }
+
+
+def facebook_graph_lead(**overrides):
+    data = {
+        "created_time": "2026-08-23T12:00:00+0000",
+        "id": "444",
+        "ad_id": "333",
+        "form_id": "222",
+        "field_data": [
+            {"name": "full_name", "values": ["Joe Example"]},
+            {"name": "email", "values": ["joe@example.com"]},
+            {"name": "phone_number", "values": ["+14155552671"]},
+            {"name": "what_kind_of_video", "values": ["Recruiting highlight"]},
+        ],
+    }
+    data.update(overrides)
+    return data
+
+
+class FacebookLeadWebhookTests(TestCase):
+    def _post_webhook(self, payload, secret="fb-secret"):
+        import hashlib
+        import hmac
+
+        body = json.dumps(payload).encode()
+        sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        return Client().post(
+            "/webhook/facebook/",
+            data=body,
+            content_type="application/json",
+            headers={"X-Hub-Signature-256": sig},
+        )
+
+    def test_verify_handshake_returns_challenge(self):
+        with override_settings(FACEBOOK_VERIFY_TOKEN="meatyhamhock"):
+            response = Client().get("/webhook/facebook/", {
+                "hub.mode": "subscribe",
+                "hub.verify_token": "meatyhamhock",
+                "hub.challenge": "1158201444",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode(), "1158201444")
+
+    def test_verify_handshake_rejects_bad_token(self):
+        with override_settings(FACEBOOK_VERIFY_TOKEN="meatyhamhock"):
+            response = Client().get("/webhook/facebook/", {
+                "hub.mode": "subscribe",
+                "hub.verify_token": "wrong",
+                "hub.challenge": "1158201444",
+            })
+        self.assertEqual(response.status_code, 403)
+
+    def test_webhook_rejects_bad_signature(self):
+        with override_settings(FACEBOOK_APP_SECRET="fb-secret"):
+            response = Client().post(
+                "/webhook/facebook/",
+                data=json.dumps(facebook_leadgen_payload()),
+                content_type="application/json",
+                headers={"X-Hub-Signature-256": "sha256=deadbeef"},
+            )
+        self.assertEqual(response.status_code, 403)
+
+    def test_webhook_creates_person_lead_and_note(self):
+        from .models import FacebookLead
+        from .pipedrive_client import FakePipedriveClient
+
+        fake = FakePipedriveClient()
+        with override_settings(FACEBOOK_APP_SECRET="fb-secret", FACEBOOK_PAGE_ID=""):
+            with patch("scheduler.facebook_leads.fetch_lead", return_value=facebook_graph_lead()):
+                with patch("scheduler.facebook_leads.get_pipedrive_client", return_value=fake):
+                    response = self._post_webhook(facebook_leadgen_payload())
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["results"][0]["status"], "ok")
+        record = FacebookLead.objects.get(leadgen_id="444")
+        self.assertEqual(record.status, "synced")
+        self.assertEqual(record.full_name, "Joe Example")
+        self.assertEqual(record.email, "joe@example.com")
+        self.assertEqual(len(fake.persons), 1)
+        self.assertEqual(fake.persons[0]["email"], "joe@example.com")
+        self.assertEqual(len(fake.leads), 1)
+        self.assertIn("Joe Example", fake.leads[0]["title"])
+        self.assertEqual(len(fake.notes), 1)
+        self.assertIn("Recruiting highlight", fake.notes[0]["content"])
+        self.assertIn("Full name", fake.notes[0]["content"])
+        self.assertEqual(record.pipedrive_lead_id, fake.leads[0]["id"])
+
+    def test_duplicate_leadgen_id_does_not_create_second_pipedrive_lead(self):
+        from .pipedrive_client import FakePipedriveClient
+
+        fake = FakePipedriveClient()
+        with override_settings(FACEBOOK_APP_SECRET="fb-secret"):
+            with patch("scheduler.facebook_leads.fetch_lead", return_value=facebook_graph_lead()):
+                with patch("scheduler.facebook_leads.get_pipedrive_client", return_value=fake):
+                    first = self._post_webhook(facebook_leadgen_payload())
+                    second = self._post_webhook(facebook_leadgen_payload())
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["results"][0]["status"], "skipped")
+        self.assertEqual(len(fake.leads), 1)
+        from .models import FacebookLead
+        self.assertEqual(FacebookLead.objects.count(), 1)
+
+    def test_existing_person_is_reused(self):
+        from .facebook_leads import ingest_facebook_lead
+        from .pipedrive_client import FakePipedriveClient
+
+        fake = FakePipedriveClient()
+        existing_id = fake.create_person("Joe Example", email="joe@example.com", phone="+14155552671")
+        with patch("scheduler.facebook_leads.get_pipedrive_client", return_value=fake):
+            result = ingest_facebook_lead(
+                leadgen_id="999",
+                details=facebook_graph_lead(),
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["pipedrive_person_id"], str(existing_id))
+        self.assertEqual(len(fake.persons), 1)
+
+    def test_wrong_page_is_ignored(self):
+        from .models import FacebookLead
+
+        with override_settings(FACEBOOK_APP_SECRET="fb-secret", FACEBOOK_PAGE_ID="111"):
+            response = self._post_webhook(facebook_leadgen_payload(page_id="999"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"], [])
+        self.assertEqual(FacebookLead.objects.count(), 0)
+
+    def test_graph_failure_returns_500_so_meta_retries(self):
+        from .facebook_client import FacebookLeadFetchError
+        from .models import FacebookLead
+
+        with override_settings(FACEBOOK_APP_SECRET="fb-secret"):
+            with patch("scheduler.facebook_leads.fetch_lead", side_effect=FacebookLeadFetchError("nope")):
+                response = self._post_webhook(facebook_leadgen_payload())
+        self.assertEqual(response.status_code, 500)
+        record = FacebookLead.objects.get(leadgen_id="444")
+        self.assertEqual(record.status, "failed")
+
+
+class GameOpportunitiesTests(TestCase):
+    def setUp(self):
+        self.sample_report = {
+            "generated_at": "2026-10-15 10:00 AM EDT",
+            "generated_iso": "2099-10-15T14:00:00+00:00",
+            "sites": [
+                {"name": "AYHL", "url": "https://atlantichockey.org/ayhl.php"},
+                {"name": "GameSheet", "url": "https://www.gamesheetinc.com/"},
+                {"name": "AHF", "url": "https://atlantichockeyfederation.com/"},
+                {"name": "THF", "url": "https://www.tier1hockeyfederation.com/"},
+                {"name": "FedHockey (EHF)", "url": "https://fedhockey.com/"},
+            ],
+            "summary": {
+                "shoot_days": 1,
+                "upcoming_shoots": 1,
+                "total_games": 2,
+                "unique_teams": 4,
+                "direct_matches": 1,
+                "maybe_matches": 1,
+                "crm_records_scanned": 500,
+            },
+            "days": [
+                {
+                    "date": "2026-10-17",
+                    "date_label": "Saturday, Oct 17, 2026",
+                    "rinks": ["Red Bank Armory"],
+                    "shoots": [
+                        {
+                            "activity_id": "17660",
+                            "date": "2026-10-17",
+                            "time": "11:45 AM",
+                            "sort_time": "11:45",
+                            "title": "Shoot Booking",
+                            "client_name": "Scott Jackson",
+                            "client_note": "Mid Fairfield 2012",
+                            "location": "The Red Bank Armory Ice Complex, Red Bank, NJ",
+                            "rink": "Red Bank Armory",
+                            "deal_id": "",
+                            "person_id": "2279",
+                            "crm_url": "https://example.pipedrive.com/person/2279",
+                        }
+                    ],
+                    "games": [
+                        {
+                            "date": "2026-10-17",
+                            "time": "11:45 AM",
+                            "sort_time": "11:45",
+                            "away": "Mid Fairfield 14U",
+                            "home": "Red Bank Generals 14U",
+                            "division": "14U",
+                            "rink": "Red Bank Armory",
+                            "published_venue": "Red Bank Armory",
+                            "site": "THF",
+                            "source_url": "https://www.tier1hockeyfederation.com/schedule/?game=1",
+                        }
+                    ],
+                    "teams": [
+                        {
+                            "name": "Red Bank Generals 14U",
+                            "raw_name": "Red Bank Generals 14U",
+                            "division": "14U",
+                            "rink": "Red Bank Armory",
+                            "site": "THF",
+                            "club": "Red Bank Generals",
+                            "direct_matches_count": 1,
+                            "maybe_matches_count": 1,
+                            "games": [
+                                {
+                                    "time": "11:45 AM",
+                                    "opponent": "Mid Fairfield 14U",
+                                    "rink": "Red Bank Armory",
+                                    "published_venue": "Red Bank Armory",
+                                    "site": "THF",
+                                    "source_url": "https://www.tier1hockeyfederation.com/schedule/?game=1",
+                                }
+                            ],
+                        }
+                    ],
+                    "direct_matches": [
+                        {
+                            "match_type": "direct",
+                            "reason": "Matches Red Bank Generals + age group (14U)",
+                            "club": "Red Bank Generals",
+                            "team": "Red Bank Generals 14U",
+                            "division": "14U",
+                            "rink": "Red Bank Armory",
+                            "games": [
+                                {
+                                    "time": "11:45 AM",
+                                    "opponent": "Mid Fairfield 14U",
+                                    "rink": "Red Bank Armory",
+                                    "published_venue": "Red Bank Armory",
+                                    "site": "THF",
+                                    "source_url": "https://www.tier1hockeyfederation.com/schedule/?game=1",
+                                }
+                            ],
+                            "crm_kind": "deal",
+                            "crm_id": "101",
+                            "crm_title": "Zach Rozell",
+                            "crm_person": "Zach Rozell",
+                            "crm_status": "open",
+                            "crm_url": "https://example.pipedrive.com/deal/101",
+                            "evidence": "Coaches red bank generals 14aa during the regular season",
+                            "our_shoots": [
+                                {
+                                    "time": "11:45 AM",
+                                    "title": "Shoot Booking",
+                                    "client_name": "Scott Jackson",
+                                    "rink": "Red Bank Armory",
+                                    "crm_url": "https://example.pipedrive.com/person/2279",
+                                }
+                            ],
+                        }
+                    ],
+                    "maybe_matches": [
+                        {
+                            "match_type": "maybe",
+                            "reason": "Club match (Red Bank Generals) — age/level not specified in CRM",
+                            "club": "Red Bank Generals",
+                            "team": "Red Bank Generals 14U",
+                            "division": "14U",
+                            "rink": "Red Bank Armory",
+                            "games": [],
+                            "crm_kind": "deal",
+                            "crm_id": "102",
+                            "crm_title": "Generals Inquiry",
+                            "crm_person": "Alex Smith",
+                            "crm_status": "lost",
+                            "crm_url": "https://example.pipedrive.com/deal/102",
+                            "evidence": "Interested in Red Bank Generals team package",
+                            "our_shoots": [],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def test_opportunities_page_renders_days_games_teams_and_crm_matches(self):
+        from .models import GameOpportunitySnapshot
+
+        GameOpportunitySnapshot.objects.create(
+            generated_at=self.sample_report["generated_at"],
+            payload=self.sample_report,
+        )
+        response = self.client.get("/opportunities/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Game Opportunities")
+        self.assertContains(response, "Saturday, Oct 17, 2026")
+        self.assertContains(response, "Red Bank Armory")
+        self.assertContains(response, "Mid Fairfield 14U")
+        self.assertContains(response, "Red Bank Generals 14U")
+        self.assertContains(response, "Zach Rozell")
+        self.assertContains(response, "Generals Inquiry")
+
+        # Filter to open deals only
+        open_resp = self.client.get("/opportunities/", {"filter": "open_deals"})
+        self.assertEqual(open_resp.status_code, 200)
+        self.assertContains(open_resp, "Zach Rozell")
+        self.assertNotContains(open_resp, "Generals Inquiry")
+
+    def test_sync_endpoint_saves_snapshot_and_checks_secret(self):
+        from pathlib import Path
+        from .models import GameOpportunitySnapshot
+
+        with override_settings(PIPEDRIVE_WEBHOOK_SECRET="sync-secret"):
+            forbidden = self.client.post(
+                "/api/opportunities/sync/",
+                data=json.dumps(self.sample_report),
+                content_type="application/json",
+            )
+            self.assertEqual(forbidden.status_code, 403)
+
+            with patch("scheduler.game_opportunities.DATA_FILE", Path("/tmp/opencode/test_game_opp.json")):
+                ok = self.client.post(
+                    "/api/opportunities/sync/",
+                    data=json.dumps(self.sample_report),
+                    content_type="application/json",
+                    HTTP_X_SYNC_SECRET="sync-secret",
+                )
+            self.assertEqual(ok.status_code, 200)
+            self.assertEqual(GameOpportunitySnapshot.objects.count(), 1)
+
+    def test_rink_and_age_helpers(self):
+        from .game_opportunities import canonical_rink, extract_ages, resolve_club_rule
+
+        self.assertEqual(
+            canonical_rink("Bridgewater Sports Arena, Frontier Road, Bridgewater, NJ, USA"),
+            "Bridgewater Sports Arena (NJ)",
+        )
+        self.assertEqual(
+            canonical_rink("RSG Arenas at Bridgewater Red Rink", "THF"),
+            "Bridgewater Sports Arena (NJ)",
+        )
+        self.assertIsNone(canonical_rink("Bridgewater Ice Arena East Rink", "FedHockey (EHF)"))
+        self.assertIn("14u", extract_ages("Hollydell Hurricanes 14UAA"))
+        self.assertIn("12u", extract_ages("NJ Rockets 2014 AAA Major"))
+        self.assertEqual(resolve_club_rule("Rocket Hockey Clubs 14GRY")[0], "New Jersey Rockets")
+
+

@@ -1,0 +1,464 @@
+{% extends "base.html" %}
+{% block title %}Game Opportunities · Shoot Scheduler{% endblock %}
+
+{% block content %}
+<div class="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+    <div>
+        <h1 class="text-3xl font-bold mb-1">Game Opportunities</h1>
+        <p class="text-slate-500">
+            Day-by-day shoot schedule cross-referenced against AYHL, GameSheet, AHF, THF, and FedHockey + your entire Pipedrive CRM.
+        </p>
+        {% if report.generated_at %}
+        <div class="text-xs text-slate-400 mt-1">
+            Last researched locally: <span class="font-medium text-slate-600">{{ report.generated_at }}</span>
+            · {{ summary.crm_records_scanned }} CRM records scanned
+        </div>
+        {% endif %}
+    </div>
+    <div class="inline-flex rounded-lg border border-slate-200 bg-white p-1 text-sm shadow-sm w-fit">
+        <a href="{% url 'dashboard' %}" class="px-3 py-1.5 rounded-md text-slate-600 hover:bg-slate-50">Videographers</a>
+        <a href="{% url 'edits_dashboard' %}" class="px-3 py-1.5 rounded-md text-slate-600 hover:bg-slate-50">Editors</a>
+        <a href="{% url 'game_opportunities' %}" class="px-3 py-1.5 rounded-md bg-slate-900 text-white">Game Opportunities</a>
+    </div>
+</div>
+
+<!-- Monitored Sites Strip -->
+<div class="mb-6 flex flex-wrap items-center gap-2 text-xs">
+    <span class="font-semibold uppercase tracking-wide text-slate-400 mr-1">5 Target Sites:</span>
+    {% for site in sites %}
+    <a href="{{ site.url }}" target="_blank" rel="noopener noreferrer"
+       class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700 hover:border-blue-400 hover:text-blue-600 shadow-sm transition">
+        <span>{{ site.name }}</span>
+        <span class="text-slate-400">↗</span>
+    </a>
+    {% endfor %}
+</div>
+
+<!-- Summary KPI Cards -->
+<div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-8">
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Shoot Days</div>
+        <div class="text-2xl font-bold">{{ summary.shoot_days|default:0 }}</div>
+        <div class="text-xs text-slate-400 mt-0.5">upcoming dates</div>
+    </div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Booked Shoots</div>
+        <div class="text-2xl font-bold text-blue-600">{{ summary.upcoming_shoots|default:0 }}</div>
+        <div class="text-xs text-slate-400 mt-0.5">across all rinks</div>
+    </div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Games Found</div>
+        <div class="text-2xl font-bold">{{ summary.total_games|default:0 }}</div>
+        <div class="text-xs text-slate-400 mt-0.5">at same rinks &amp; days</div>
+    </div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+        <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Teams Playing</div>
+        <div class="text-2xl font-bold">{{ summary.unique_teams|default:0 }}</div>
+        <div class="text-xs text-slate-400 mt-0.5">unique squads</div>
+    </div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-emerald-200 bg-emerald-50/30">
+        <div class="text-xs uppercase tracking-wide text-emerald-700 mb-1 font-semibold">Direct CRM Matches</div>
+        <div class="text-2xl font-bold text-emerald-600">{{ summary.direct_matches|default:0 }}</div>
+        <div class="text-xs text-emerald-600/80 mt-0.5">club + age group match</div>
+    </div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-amber-200 bg-amber-50/30">
+        <div class="text-xs uppercase tracking-wide text-amber-700 mb-1 font-semibold">Maybe CRM Matches</div>
+        <div class="text-2xl font-bold text-amber-600">{{ summary.maybe_matches|default:0 }}</div>
+        <div class="text-xs text-amber-600/80 mt-0.5">club match · verify age/level</div>
+    </div>
+</div>
+
+<!-- Filter Bar -->
+<form method="get" action="{% url 'game_opportunities' %}" class="bg-white rounded-xl p-4 shadow-sm border border-slate-200 mb-8 flex flex-wrap items-end gap-4">
+    <div class="flex-1 min-w-[200px]">
+        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Search Team, Club, or CRM Lead</label>
+        <input type="text" name="q" value="{{ search_q }}" placeholder="e.g. Rockets, Jr Eagles, Hollydell, Rozell..."
+               class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none">
+    </div>
+    <div>
+        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Shoot Day</label>
+        <select name="date" class="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+            <option value="">All Days ({{ all_dates|length }})</option>
+            {% for dt_val, dt_lbl in all_dates %}
+            <option value="{{ dt_val }}" {% if selected_date == dt_val %}selected{% endif %}>{{ dt_lbl }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Rink</label>
+        <select name="rink" class="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+            <option value="">All Rinks ({{ all_rinks|length }})</option>
+            {% for rk in all_rinks %}
+            <option value="{{ rk }}" {% if selected_rink == rk %}selected{% endif %}>{{ rk }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Match Filter</label>
+        <select name="filter" class="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+            <option value="all" {% if filter_mode == "all" %}selected{% endif %}>All Shoot Days</option>
+            <option value="with_matches" {% if filter_mode == "with_matches" %}selected{% endif %}>Days with CRM Matches</option>
+            <option value="open_deals" {% if filter_mode == "open_deals" %}selected{% endif %}>Open CRM Deals/Leads Only</option>
+        </select>
+    </div>
+    <div class="flex items-center gap-2">
+        <button type="submit" class="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 transition">
+            Filter
+        </button>
+        {% if selected_date or selected_rink or filter_mode != "all" or search_q %}
+        <a href="{% url 'game_opportunities' %}" class="px-3 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm hover:bg-slate-50 transition">
+            Reset
+        </a>
+        {% endif %}
+    </div>
+</form>
+
+<!-- Day-by-Day Breakdown -->
+{% if days %}
+<div class="space-y-10">
+    {% for day in days %}
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <!-- Day Header -->
+        <div class="bg-slate-900 text-white px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div>
+                <div class="flex items-center gap-3 flex-wrap">
+                    <h2 class="text-xl font-bold">{{ day.date_label }}</h2>
+                    <span class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">{{ day.date }}</span>
+                </div>
+                <div class="flex flex-wrap gap-1.5 mt-2">
+                    {% for rk in day.rinks %}
+                    <span class="text-xs px-2.5 py-0.5 rounded-md bg-blue-500/20 text-blue-200 border border-blue-400/30 font-medium">
+                        📍 {{ rk }}
+                    </span>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+                <span class="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 font-medium">
+                    🎬 {{ day.shoots|length }} Shoot{{ day.shoots|length|pluralize }}
+                </span>
+                <span class="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 font-medium">
+                    🏒 {{ day.games|length }} Game{{ day.games|length|pluralize }}
+                </span>
+                <span class="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 font-medium">
+                    👕 {{ day.teams|length }} Team{{ day.teams|length|pluralize }}
+                </span>
+                <span class="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 font-semibold">
+                    ✓ {{ day.direct_matches|length }} Direct
+                </span>
+                <span class="px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-400/30 font-semibold">
+                    ? {{ day.maybe_matches|length }} Maybe
+                </span>
+            </div>
+        </div>
+
+        <div class="p-6 space-y-8">
+            <!-- 1. Booked Shoots for the Day -->
+            <div>
+                <h3 class="text-sm font-bold uppercase tracking-wider text-slate-500 mb-3">
+                    1. Our Booked Shoots on {{ day.date_label }} ({{ day.shoots|length }})
+                </h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {% for shoot in day.shoots %}
+                    <div class="rounded-xl border border-slate-200 bg-slate-50/70 p-4 flex flex-col justify-between">
+                        <div>
+                            <div class="flex items-center justify-between gap-2 mb-1">
+                                <span class="inline-block px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-xs font-bold">
+                                    {{ shoot.time }}
+                                </span>
+                                <span class="text-xs font-semibold text-slate-700">{{ shoot.rink }}</span>
+                            </div>
+                            <div class="font-semibold text-slate-900 text-sm mt-1">
+                                {% if shoot.crm_url %}
+                                <a href="{{ shoot.crm_url }}" target="_blank" rel="noopener noreferrer" class="hover:text-blue-600 underline">
+                                    {{ shoot.client_name|default:shoot.title }} ↗
+                                </a>
+                                {% else %}
+                                {{ shoot.client_name|default:shoot.title }}
+                                {% endif %}
+                            </div>
+                            <div class="text-xs text-slate-500 mt-0.5">{{ shoot.location }}</div>
+                            {% if shoot.client_note %}
+                            <div class="mt-2 text-xs text-slate-600 bg-white rounded-lg p-2 border border-slate-200/80 line-clamp-3">
+                                {{ shoot.client_note }}
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <!-- 2. CRM Matches (Direct + Maybe) -->
+            <div>
+                <h3 class="text-sm font-bold uppercase tracking-wider text-slate-500 mb-3">
+                    2. CRM Leads &amp; Deals Playing at These Rinks ({{ day.direct_matches|length }} Direct · {{ day.maybe_matches|length }} Maybe)
+                </h3>
+
+                {% if day.direct_matches or day.maybe_matches %}
+                <div class="space-y-4">
+                    {% if day.direct_matches %}
+                    <div class="rounded-xl border border-emerald-200 overflow-hidden">
+                        <div class="bg-emerald-50 px-4 py-2.5 border-b border-emerald-200 flex items-center justify-between">
+                            <span class="text-xs font-bold uppercase tracking-wider text-emerald-800">
+                                Direct Matches — Club + Age Group Verified ({{ day.direct_matches|length }})
+                            </span>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead class="text-xs uppercase tracking-wide text-slate-500 bg-slate-50 border-b border-slate-100">
+                                    <tr>
+                                        <th class="px-4 py-2.5 text-left">CRM Lead / Deal</th>
+                                        <th class="px-4 py-2.5 text-left">Team &amp; Game(s) That Day</th>
+                                        <th class="px-4 py-2.5 text-left">Our Existing Shoot</th>
+                                        <th class="px-4 py-2.5 text-left">CRM Note / Match Reason</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    {% for m in day.direct_matches %}
+                                    <tr class="hover:bg-emerald-50/30 align-top">
+                                        <td class="px-4 py-3">
+                                            <div class="flex items-center gap-2 flex-wrap">
+                                                <a href="{{ m.crm_url }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-900 hover:text-blue-600 underline">
+                                                    {{ m.crm_title }} ↗
+                                                </a>
+                                                {% if m.crm_status == "open" %}
+                                                <span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[11px] font-semibold uppercase">Open</span>
+                                                {% elif m.crm_status == "won" %}
+                                                <span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[11px] font-semibold uppercase">Won</span>
+                                                {% else %}
+                                                <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[11px] font-semibold uppercase">{{ m.crm_status }}</span>
+                                                {% endif %}
+                                            </div>
+                                            {% if m.crm_person and m.crm_person != m.crm_title %}
+                                            <div class="text-xs text-slate-500 mt-0.5">Contact: {{ m.crm_person }}</div>
+                                            {% endif %}
+                                        </td>
+                                        <td class="px-4 py-3">
+                                            <div class="font-semibold text-slate-900">{{ m.team }}</div>
+                                            <div class="text-xs text-slate-500 mb-1">📍 {{ m.rink }}</div>
+                                            {% for g in m.games %}
+                                            <div class="text-xs text-slate-700 bg-slate-50 rounded px-2 py-1 mb-1 border border-slate-200/70">
+                                                <span class="font-bold">{{ g.time }}</span> vs {{ g.opponent }}
+                                                <span class="text-slate-400">· {{ g.published_venue }} ({{ g.site }})</span>
+                                                {% if g.source_url %}
+                                                <a href="{{ g.source_url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline ml-1">Source ↗</a>
+                                                {% endif %}
+                                            </div>
+                                            {% endfor %}
+                                        </td>
+                                        <td class="px-4 py-3 text-xs">
+                                            {% for s in m.our_shoots %}
+                                            <div class="mb-1">
+                                                <span class="font-semibold text-slate-800">{{ s.time }}</span> ·
+                                                <a href="{{ s.crm_url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">
+                                                    {{ s.client_name|default:s.title }}
+                                                </a>
+                                                <div class="text-slate-400">{{ s.rink }}</div>
+                                            </div>
+                                            {% endfor %}
+                                        </td>
+                                        <td class="px-4 py-3 text-xs">
+                                            <div class="font-semibold text-emerald-700 mb-1">{{ m.reason }}</div>
+                                            <div class="text-slate-600 bg-slate-50 p-2 rounded border border-slate-200/60">{{ m.evidence }}</div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {% if day.maybe_matches %}
+                    <div class="rounded-xl border border-amber-200 overflow-hidden">
+                        <div class="bg-amber-50 px-4 py-2.5 border-b border-amber-200 flex items-center justify-between">
+                            <span class="text-xs font-bold uppercase tracking-wider text-amber-800">
+                                Maybe Matches — Club Matches, Verify Age Group / Level ({{ day.maybe_matches|length }})
+                            </span>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead class="text-xs uppercase tracking-wide text-slate-500 bg-slate-50 border-b border-slate-100">
+                                    <tr>
+                                        <th class="px-4 py-2.5 text-left">CRM Lead / Deal</th>
+                                        <th class="px-4 py-2.5 text-left">Team &amp; Game(s) That Day</th>
+                                        <th class="px-4 py-2.5 text-left">Our Existing Shoot</th>
+                                        <th class="px-4 py-2.5 text-left">CRM Note / Match Reason</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    {% for m in day.maybe_matches %}
+                                    <tr class="hover:bg-amber-50/30 align-top">
+                                        <td class="px-4 py-3">
+                                            <div class="flex items-center gap-2 flex-wrap">
+                                                <a href="{{ m.crm_url }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-900 hover:text-blue-600 underline">
+                                                    {{ m.crm_title }} ↗
+                                                </a>
+                                                {% if m.crm_status == "open" %}
+                                                <span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[11px] font-semibold uppercase">Open</span>
+                                                {% elif m.crm_status == "won" %}
+                                                <span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[11px] font-semibold uppercase">Won</span>
+                                                {% else %}
+                                                <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[11px] font-semibold uppercase">{{ m.crm_status }}</span>
+                                                {% endif %}
+                                            </div>
+                                            {% if m.crm_person and m.crm_person != m.crm_title %}
+                                            <div class="text-xs text-slate-500 mt-0.5">Contact: {{ m.crm_person }}</div>
+                                            {% endif %}
+                                        </td>
+                                        <td class="px-4 py-3">
+                                            <div class="font-semibold text-slate-900">{{ m.team }}</div>
+                                            <div class="text-xs text-slate-500 mb-1">📍 {{ m.rink }}</div>
+                                            {% for g in m.games %}
+                                            <div class="text-xs text-slate-700 bg-slate-50 rounded px-2 py-1 mb-1 border border-slate-200/70">
+                                                <span class="font-bold">{{ g.time }}</span> vs {{ g.opponent }}
+                                                <span class="text-slate-400">· {{ g.published_venue }} ({{ g.site }})</span>
+                                                {% if g.source_url %}
+                                                <a href="{{ g.source_url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline ml-1">Source ↗</a>
+                                                {% endif %}
+                                            </div>
+                                            {% endfor %}
+                                        </td>
+                                        <td class="px-4 py-3 text-xs">
+                                            {% for s in m.our_shoots %}
+                                            <div class="mb-1">
+                                                <span class="font-semibold text-slate-800">{{ s.time }}</span> ·
+                                                <a href="{{ s.crm_url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">
+                                                    {{ s.client_name|default:s.title }}
+                                                </a>
+                                                <div class="text-slate-400">{{ s.rink }}</div>
+                                            </div>
+                                            {% endfor %}
+                                        </td>
+                                        <td class="px-4 py-3 text-xs">
+                                            <div class="font-semibold text-amber-700 mb-1">{{ m.reason }}</div>
+                                            <div class="text-slate-600 bg-slate-50 p-2 rounded border border-slate-200/60">{{ m.evidence }}</div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+                {% else %}
+                <div class="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                    No CRM leads matched the teams found for this day yet.
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- 3. All Teams Playing at Same Rink(s) That Day -->
+            <details class="group rounded-xl border border-slate-200 bg-slate-50/50" {% if day.teams|length <= 30 %}open{% endif %}>
+                <summary class="px-4 py-3 cursor-pointer select-none flex items-center justify-between font-bold text-sm uppercase tracking-wider text-slate-600 hover:text-slate-900">
+                    <span>3. All Teams Playing at Our Shoot Rinks on {{ day.date_label }} ({{ day.teams|length }} Teams)</span>
+                    <span class="text-xs font-normal text-blue-600 group-open:hidden">Show all {{ day.teams|length }} teams ▼</span>
+                    <span class="text-xs font-normal text-slate-400 hidden group-open:inline">Collapse ▲</span>
+                </summary>
+                <div class="p-4 pt-0 border-t border-slate-200/80">
+                    {% if day.teams %}
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 mt-3">
+                        {% for t in day.teams %}
+                        <div class="rounded-lg border p-3 text-xs {% if t.direct_matches_count %}border-emerald-300 bg-emerald-50/40{% elif t.maybe_matches_count %}border-amber-300 bg-amber-50/40{% else %}border-slate-200 bg-white{% endif %}">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="font-bold text-slate-900 text-sm">{{ t.name }}</div>
+                                <div class="flex gap-1 shrink-0">
+                                    {% if t.direct_matches_count %}
+                                    <span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                                        {{ t.direct_matches_count }} Direct
+                                    </span>
+                                    {% endif %}
+                                    {% if t.maybe_matches_count %}
+                                    <span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-bold text-[10px]">
+                                        {{ t.maybe_matches_count }} Maybe
+                                    </span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="text-slate-500 mt-1">
+                                📍 {{ t.rink }} · <span class="text-slate-600 font-medium">{{ t.site }}</span>
+                            </div>
+                            <div class="mt-1.5 space-y-0.5 text-slate-600">
+                                {% for g in t.games %}
+                                <div>🕒 <span class="font-semibold">{{ g.time }}</span> vs {{ g.opponent }}</div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="text-sm text-slate-500 mt-3">No published games found on the 5 sites for this rink/date yet.</p>
+                    {% endif %}
+                </div>
+            </details>
+
+            <!-- 4. Every Game Played at the Same Rink(s) That Day -->
+            <details class="group rounded-xl border border-slate-200 bg-white" {% if day.games|length <= 25 %}open{% endif %}>
+                <summary class="px-4 py-3 cursor-pointer select-none flex items-center justify-between font-bold text-sm uppercase tracking-wider text-slate-600 hover:text-slate-900">
+                    <span>4. Every Game Played at Same Rink(s) on {{ day.date_label }} ({{ day.games|length }} Games)</span>
+                    <span class="text-xs font-normal text-blue-600 group-open:hidden">Show all {{ day.games|length }} games ▼</span>
+                    <span class="text-xs font-normal text-slate-400 hidden group-open:inline">Collapse ▲</span>
+                </summary>
+                <div class="border-t border-slate-100">
+                    {% if day.games %}
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead class="text-xs uppercase tracking-wide text-slate-500 bg-slate-50">
+                                <tr>
+                                    <th class="px-4 py-2.5 text-left">Time</th>
+                                    <th class="px-4 py-2.5 text-left">Rink / Sheet</th>
+                                    <th class="px-4 py-2.5 text-left">Away Team</th>
+                                    <th class="px-4 py-2.5 text-left">Home Team</th>
+                                    <th class="px-4 py-2.5 text-left">Division / Level</th>
+                                    <th class="px-4 py-2.5 text-left">Source Site</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                {% for g in day.games %}
+                                <tr class="hover:bg-slate-50">
+                                    <td class="px-4 py-2.5 font-semibold text-slate-900 whitespace-nowrap">{{ g.time }}</td>
+                                    <td class="px-4 py-2.5 text-xs text-slate-600">
+                                        <div class="font-medium text-slate-800">{{ g.rink }}</div>
+                                        {% if g.published_venue and g.published_venue != g.rink %}
+                                        <div class="text-slate-400">{{ g.published_venue }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-2.5 font-medium text-slate-800">{{ g.away }}</td>
+                                    <td class="px-4 py-2.5 font-medium text-slate-800">{{ g.home }}</td>
+                                    <td class="px-4 py-2.5 text-xs text-slate-500">{{ g.division|default:"—" }}</td>
+                                    <td class="px-4 py-2.5 text-xs whitespace-nowrap">
+                                        {% if g.source_url %}
+                                        <a href="{{ g.source_url }}" target="_blank" rel="noopener noreferrer"
+                                           class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 text-slate-700 hover:bg-blue-50 hover:text-blue-600 font-medium">
+                                            {{ g.site }} ↗
+                                        </a>
+                                        {% else %}
+                                        <span class="px-2 py-0.5 rounded bg-slate-100 text-slate-600">{{ g.site }}</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="p-4 text-sm text-slate-500">
+                        No published games found on the 5 target sites for this date/rink yet.
+                    </div>
+                    {% endif %}
+                </div>
+            </details>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="bg-white rounded-xl p-12 text-center border border-slate-200 text-slate-500">
+    <div class="text-4xl mb-2">🏒</div>
+    <p class="font-semibold text-slate-700">No matching shoot days found.</p>
+    <p class="text-xs text-slate-400 mt-1">Run <code class="bg-slate-100 px-1.5 py-0.5 rounded">python manage.py research_game_opportunities</code> locally or adjust your filters.</p>
+</div>
+{% endif %}
+{% endblock %}

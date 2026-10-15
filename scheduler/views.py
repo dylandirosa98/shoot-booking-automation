@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from django.conf import settings
 from django.contrib import messages
-from django.http import JsonResponse, HttpResponseForbidden, HttpResponseBadRequest
+from django.http import JsonResponse, HttpResponse, HttpResponseForbidden, HttpResponseBadRequest
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -667,3 +667,186 @@ def pipedrive_webhook(request):
     # action == "change"
     shoot, taken = handle_updated_shoot(**kwargs)
     return JsonResponse({"status": "ok", "action": taken, "shoot_id": shoot.id, "shoot_status": shoot.status})
+
+
+# ----------------------------------------------------------------------------
+# Facebook Instant Form webhook (inbound). Writes to Pipedrive via API.
+# ----------------------------------------------------------------------------
+
+def _facebook_verify(request):
+    mode = request.GET.get("hub.mode", "")
+    token = request.GET.get("hub.verify_token", "")
+    challenge = request.GET.get("hub.challenge", "")
+    expected = settings.FACEBOOK_VERIFY_TOKEN
+    if mode == "subscribe" and expected and token == expected:
+        return HttpResponse(challenge, content_type="text/plain")
+    return HttpResponseForbidden("Verification failed")
+
+
+@csrf_exempt
+def facebook_webhook(request):
+    if request.method == "GET":
+        return _facebook_verify(request)
+    if request.method != "POST":
+        return HttpResponseBadRequest("Method not allowed")
+
+    from .facebook_client import verify_signature
+    from .facebook_leads import ingest_leadgen_notification
+
+    if not verify_signature(request.body, request.headers.get("X-Hub-Signature-256")):
+        return HttpResponseForbidden("Bad signature")
+
+    try:
+        payload = json.loads(request.body.decode() or "{}")
+    except Exception:
+        return HttpResponseBadRequest("Invalid JSON")
+
+    results = []
+    expected_page = (settings.FACEBOOK_PAGE_ID or "").strip()
+    for entry in payload.get("entry") or []:
+        page_id = str(entry.get("id") or "")
+        if expected_page and page_id and page_id != expected_page:
+            logger.info("Facebook webhook: ignoring page %s", page_id)
+            continue
+        for change in entry.get("changes") or []:
+            if change.get("field") != "leadgen":
+                continue
+            results.append(ingest_leadgen_notification(change.get("value") or {}))
+
+    failed = any(item.get("status") == "failed" for item in results)
+    body = {"status": "ok" if not failed else "error", "results": results}
+    return JsonResponse(body, status=500 if failed else 200)
+
+
+# ----------------------------------------------------------------------------
+# Game Opportunities (Day-by-day 5-site schedule + CRM lead/deal research)
+# ----------------------------------------------------------------------------
+
+def game_opportunities(request):
+    from .game_opportunities import load_saved_report
+
+    report = load_saved_report()
+    all_days = report.get("days") or []
+    all_rinks = sorted({rk for d in all_days for rk in (d.get("rinks") or []) if rk})
+    all_dates = [(d["date"], d.get("date_label") or d["date"]) for d in all_days]
+
+    selected_date = (request.GET.get("date") or "").strip()
+    selected_rink = (request.GET.get("rink") or "").strip()
+    filter_mode = (request.GET.get("filter") or "all").strip()
+    search_q = (request.GET.get("q") or "").strip().lower()
+
+    filtered_days = []
+    for day in all_days:
+        if selected_date and day.get("date") != selected_date:
+            continue
+        if selected_rink and selected_rink not in (day.get("rinks") or []):
+            continue
+
+        shoots = [
+            s for s in (day.get("shoots") or [])
+            if not selected_rink or s.get("rink") == selected_rink
+        ]
+        games = [
+            g for g in (day.get("games") or [])
+            if not selected_rink or g.get("rink") == selected_rink
+        ]
+        teams = [
+            t for t in (day.get("teams") or [])
+            if not selected_rink or t.get("rink") == selected_rink
+        ]
+        direct_matches = [
+            m for m in (day.get("direct_matches") or [])
+            if not selected_rink or m.get("rink") == selected_rink
+        ]
+        maybe_matches = [
+            m for m in (day.get("maybe_matches") or [])
+            if not selected_rink or m.get("rink") == selected_rink
+        ]
+
+        if filter_mode == "open_deals":
+            direct_matches = [m for m in direct_matches if m.get("crm_status") == "open"]
+            maybe_matches = [m for m in maybe_matches if m.get("crm_status") == "open"]
+
+        if search_q:
+            games = [
+                g for g in games
+                if search_q in (
+                    f"{g.get('away', '')} {g.get('home', '')} {g.get('rink', '')} {g.get('site', '')} {g.get('division', '')}"
+                ).lower()
+            ]
+            teams = [
+                t for t in teams
+                if search_q in (
+                    f"{t.get('name', '')} {t.get('club', '')} {t.get('rink', '')} {t.get('division', '')}"
+                ).lower()
+            ]
+            direct_matches = [
+                m for m in direct_matches
+                if search_q in (
+                    f"{m.get('crm_title', '')} {m.get('crm_person', '')} {m.get('team', '')} {m.get('club', '')} {m.get('rink', '')} {m.get('evidence', '')}"
+                ).lower()
+            ]
+            maybe_matches = [
+                m for m in maybe_matches
+                if search_q in (
+                    f"{m.get('crm_title', '')} {m.get('crm_person', '')} {m.get('team', '')} {m.get('club', '')} {m.get('rink', '')} {m.get('evidence', '')}"
+                ).lower()
+            ]
+            if not (games or teams or direct_matches or maybe_matches):
+                continue
+
+        if filter_mode in {"with_matches", "open_deals"} and not (direct_matches or maybe_matches):
+            continue
+
+        filtered_days.append({
+            **day,
+            "shoots": shoots,
+            "games": games,
+            "teams": teams,
+            "direct_matches": direct_matches,
+            "maybe_matches": maybe_matches,
+        })
+
+    return render(request, "game_opportunities.html", {
+        "report": report,
+        "summary": report.get("summary") or {},
+        "sites": report.get("sites") or [],
+        "days": filtered_days,
+        "all_rinks": all_rinks,
+        "all_dates": all_dates,
+        "selected_date": selected_date,
+        "selected_rink": selected_rink,
+        "filter_mode": filter_mode,
+        "search_q": request.GET.get("q") or "",
+    })
+
+
+@csrf_exempt
+@require_POST
+def sync_game_opportunities(request):
+    import os
+    from .game_opportunities import save_report_locally
+
+    expected_secret = (
+        os.getenv("OPPORTUNITIES_SYNC_SECRET")
+        or settings.PIPEDRIVE_WEBHOOK_SECRET
+    )
+    provided_secret = request.headers.get("X-Sync-Secret", "")
+    if expected_secret and provided_secret != expected_secret:
+        return HttpResponseForbidden("Invalid sync secret")
+
+    try:
+        payload = json.loads(request.body.decode() or "{}")
+    except Exception:
+        return HttpResponseBadRequest("Invalid JSON")
+
+    if not isinstance(payload, dict) or "days" not in payload:
+        return HttpResponseBadRequest("Expected report payload with 'days'")
+
+    save_report_locally(payload)
+    return JsonResponse({
+        "status": "ok",
+        "generated_at": payload.get("generated_at", ""),
+        "days": len(payload.get("days") or []),
+    })
+

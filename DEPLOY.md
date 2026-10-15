@@ -40,7 +40,10 @@ See `.env.example` for the full list with comments. Summary:
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | Generated locally one time (see section 5) | Yes |
 | `GOOGLE_CALENDAR_OWNER_EMAIL` | Your friend's company Google email | Yes |
 | `PIPEDRIVE_WEBHOOK_SECRET` | You make this up; configure in Pipedrive | Yes |
-| `PIPEDRIVE_API_TOKEN` | Pipedrive settings -> Personal Preferences -> API | Optional |
+| `PIPEDRIVE_API_TOKEN` | Pipedrive settings -> Personal Preferences -> API | Yes for Facebook lead ingest |
+| `FACEBOOK_VERIFY_TOKEN` | You invent this; paste into Meta webhook config | Yes for Instant Forms |
+| `FACEBOOK_APP_SECRET` | Meta app Settings -> Basic | Yes for Instant Forms |
+| `FACEBOOK_PAGE_ACCESS_TOKEN` | Graph API Explorer / system user | Yes for Instant Forms |
 | `CLICKUP_API_TOKEN` | ClickUp personal API token | Yes for edit task creation |
 | `ESCALATION_HOURS` | Default 24 | No |
 | `SCORE_PENALTY_PER_MINUTE` | Tuning knob, default 0.01 | No |
@@ -140,7 +143,47 @@ For v2 activity webhooks, Pipedrive sends this as `public_description`.
 
 ---
 
-## 7. ClickUp edit tasks
+## 7. Facebook Instant Forms -> Pipedrive
+
+This is **not** the Pipedrive activity webhook. Facebook POSTs to us; we write
+to Pipedrive with the API: Person (find-or-create) + Lead + pinned Note of every
+form answer.
+
+Callback URL to give Meta:
+
+```
+https://<your-app>.railway.app/webhook/facebook/
+```
+
+1. Create a Meta app (Business type) and add the **Webhooks** product.
+2. Subscribe to object **Page**, field **`leadgen`**.
+3. Verify token = `FACEBOOK_VERIFY_TOKEN`. The GET handshake must succeed
+   before Meta will save the callback URL.
+4. Install the app on the Page:
+
+```
+curl -X POST "https://graph.facebook.com/v22.0/{page-id}/subscribed_apps" \
+  -d "subscribed_fields=leadgen" \
+  -d "access_token={page-access-token}"
+```
+
+5. Put a long-lived **Page** access token in `FACEBOOK_PAGE_ACCESS_TOKEN`.
+   A Business Manager system user token is best so it does not expire.
+6. In Meta Business Suite -> Integrations -> Leads Access, assign this app
+   if Lead Access Manager is enabled.
+7. Set `PIPEDRIVE_API_TOKEN` (required for the write). Optional:
+   `PIPEDRIVE_LEAD_OWNER_ID`, `PIPEDRIVE_FACEBOOK_LABEL_ID`.
+8. Test with Meta's Lead Ads Testing Tool, or locally:
+
+```
+python manage.py simulate_facebook_lead --name "Jane Doe" --email jane@example.com
+```
+
+The webhook payload is IDs only. The app then fetches
+`/{leadgen_id}?fields=field_data,...` and stores a `FacebookLead` row so Meta
+retries do not create duplicate Pipedrive leads.
+
+## 8. ClickUp edit tasks
 
 The edit automation listens for Pipedrive activities whose type is exactly one of:
 
@@ -160,7 +203,34 @@ Editing Projects list using:
 A one-time migration seeds the initial editor rows, ClickUp user IDs, and rankings.
 Django records that migration, so it will not run again on later deploys.
 
-## 8. Notes / Gotchas
+## 9. Game Opportunities (`/opportunities/`)
+
+The **Game Opportunities** tab (`/opportunities/`) displays day-by-day upcoming shoot days, every hockey game played at the same rink(s) on that day across the 5 target league/schedule sites:
+
+1. **AYHL** (`https://atlantichockey.org/ayhl.php`)
+2. **GameSheet** (`https://www.gamesheetinc.com/`)
+3. **AHF** (`https://atlantichockeyfederation.com/`)
+4. **THF** (`https://www.tier1hockeyfederation.com/`)
+5. **FedHockey / EHF** (`https://fedhockey.com/`)
+
+along with all teams playing and CRM matches (**Direct Matches** + **Maybe Matches**) across your entire Pipedrive CRM.
+
+### Running locally & syncing to Railway
+
+```bash
+# Run locally across all upcoming shoot days and save to scheduler/data/game_opportunities.json + DB
+python manage.py research_game_opportunities
+
+# Optional: also run the local Muse Spark web/browser agent pass
+python manage.py research_game_opportunities --use-muse
+
+# Optional: push the fresh snapshot directly to the live Railway app
+python manage.py research_game_opportunities --push
+```
+
+Railway automatically serves `scheduler/data/game_opportunities.json` on deploy, or accepts live updates at `POST /api/opportunities/sync/` (authenticated with `X-Sync-Secret` matching `OPPORTUNITIES_SYNC_SECRET` or `PIPEDRIVE_WEBHOOK_SECRET`).
+
+## 10. Notes / Gotchas
 
 - **Time zone**: Django is set to `America/New_York`. Change in `settings.py` if needed.
 - **Refresh tokens** can be invalidated if Google account password changes. Re-run section 5 if so.

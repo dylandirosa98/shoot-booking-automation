@@ -272,3 +272,59 @@ class Invite(models.Model):
 
     def __str__(self):
         return f"{self.videographer.name} -> {self.shoot} (#{self.rank}, {self.status})"
+
+
+class FacebookLead(models.Model):
+    """One Instant Form submission. Deduped on Meta's leadgen_id."""
+
+    STATUS_CHOICES = [
+        ("received", "Received"),
+        ("synced", "Synced to Pipedrive"),
+        ("failed", "Failed"),
+    ]
+
+    leadgen_id = models.CharField(max_length=64, unique=True)
+    page_id = models.CharField(max_length=64, blank=True)
+    form_id = models.CharField(max_length=64, blank=True)
+    ad_id = models.CharField(max_length=64, blank=True)
+    adgroup_id = models.CharField(max_length=64, blank=True)
+    facebook_created_time = models.DateTimeField(null=True, blank=True)
+    field_data = models.JSONField(default=list, blank=True)
+    full_name = models.CharField(max_length=255, blank=True)
+    email = models.CharField(max_length=255, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    pipedrive_person_id = models.CharField(max_length=50, blank=True)
+    pipedrive_lead_id = models.CharField(max_length=64, blank=True)
+    pipedrive_note_id = models.CharField(max_length=50, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="received")
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        who = self.full_name or self.email or self.leadgen_id
+        return f"Facebook lead {who} ({self.status})"
+
+
+class GameOpportunitySnapshot(models.Model):
+    """
+    Stores the latest day-by-day game opportunity research generated locally
+    and displayed on the frontend (/opportunities/).
+    """
+
+    generated_at = models.CharField(max_length=100, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Game Opportunity Snapshot"
+        verbose_name_plural = "Game Opportunity Snapshots"
+
+    def __str__(self):
+        return f"Game Opportunity Snapshot ({self.generated_at or self.updated_at:%Y-%m-%d %H:%M})"
+

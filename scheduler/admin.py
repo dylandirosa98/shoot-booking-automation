@@ -1,6 +1,6 @@
 from django import forms
 from django.contrib import admin
-from .models import Editor, EditorVideoTypeRank, EditJob, Videographer, VideographerServiceState, Shoot, Invite, SchedulingSettings
+from .models import Editor, EditorVideoTypeRank, EditJob, Videographer, VideographerServiceState, Shoot, Invite, SchedulingSettings, FacebookLead, GameOpportunitySnapshot
 
 
 @admin.register(SchedulingSettings)
@@ -109,3 +109,23 @@ class InviteAdmin(admin.ModelAdmin):
     list_display = ("videographer", "shoot", "rank", "status", "sent_at", "expires_at", "google_drive_permission_id")
     list_filter = ("status",)
     search_fields = ("videographer__name", "shoot__title")
+
+
+@admin.register(FacebookLead)
+class FacebookLeadAdmin(admin.ModelAdmin):
+    list_display = ("leadgen_id", "full_name", "email", "status", "pipedrive_lead_id", "created_at")
+    list_filter = ("status",)
+    search_fields = ("leadgen_id", "full_name", "email", "phone", "pipedrive_lead_id", "form_id")
+    readonly_fields = (
+        "leadgen_id", "page_id", "form_id", "ad_id", "adgroup_id",
+        "facebook_created_time", "field_data", "full_name", "email", "phone",
+        "pipedrive_person_id", "pipedrive_lead_id", "pipedrive_note_id",
+        "status", "error", "created_at", "updated_at",
+    )
+
+
+@admin.register(GameOpportunitySnapshot)
+class GameOpportunitySnapshotAdmin(admin.ModelAdmin):
+    list_display = ("generated_at", "updated_at", "created_at")
+    readonly_fields = ("created_at", "updated_at")
+
