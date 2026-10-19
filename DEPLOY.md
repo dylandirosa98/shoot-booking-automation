@@ -205,7 +205,7 @@ Django records that migration, so it will not run again on later deploys.
 
 ## 9. Game Opportunities (`/opportunities/`)
 
-The **Game Opportunities** tab (`/opportunities/`) displays day-by-day upcoming shoot days, every hockey game played at the same rink(s) on that day across the 5 target league/schedule sites:
+The **Game Opportunities** tab (`/opportunities/`) requires staff login through `/admin/login/`. It displays upcoming shoot days and games found at the same facilities/dates in the configured seasons on five target sites:
 
 1. **AYHL** (`https://atlantichockey.org/ayhl.php`)
 2. **GameSheet** (`https://www.gamesheetinc.com/`)
@@ -213,22 +213,40 @@ The **Game Opportunities** tab (`/opportunities/`) displays day-by-day upcoming 
 4. **THF** (`https://www.tier1hockeyfederation.com/`)
 5. **FedHockey / EHF** (`https://fedhockey.com/`)
 
-along with all teams playing and CRM matches (**Direct Matches** + **Maybe Matches**) across your entire Pipedrive CRM.
+along with team labels and candidate CRM matches (**Direct Matches** + **Maybe Matches**). See the coverage limitations below.
 
 ### Running locally & syncing to Railway
 
 ```bash
-# Run locally across all upcoming shoot days and save to scheduler/data/game_opportunities.json + DB
+# Run locally across upcoming shoot days and save privately to var/game_opportunities.json + DB
 python manage.py research_game_opportunities
 
-# Optional: also run the local Muse Spark web/browser agent pass
+# Require the local Muse Spark web research pass to succeed
 python manage.py research_game_opportunities --use-muse
 
-# Optional: push the fresh snapshot directly to the live Railway app
-python manage.py research_game_opportunities --push
+# Push only after successful schedule retrieval and Muse research
+python manage.py research_game_opportunities --use-muse --push
+
+# Recommended: Luna via existing Codex/ChatGPT login, bypassing expired Muse credentials.
+# This machine's verified GameSheet-compatible public HTTP runtime:
+PYTHONPATH=venv/lib/python3.12/site-packages \
+  /home/dylandirosa/.local/bin/python3.12 manage.py research_game_opportunities \
+  --use-luna --public-python /usr/bin/python3 --push
 ```
 
-Railway automatically serves `scheduler/data/game_opportunities.json` on deploy, or accepts live updates at `POST /api/opportunities/sync/` (authenticated with `X-Sync-Secret` matching `OPPORTUNITIES_SYNC_SECRET` or `PIPEDRIVE_WEBHOOK_SECRET`).
+Railway reads its database snapshot, populated by `POST /api/opportunities/sync/` (authenticated with `X-Sync-Secret` matching `OPPORTUNITIES_SYNC_SECRET` or the legacy `PIPEDRIVE_WEBHOOK_SECRET`). Uploads fail closed when neither secret is configured. The publisher and server must share the same secret. Snapshots are no longer bundled in deployments; preserve the production database and verify a snapshot exists before deploying this change.
+
+### Refresh safety and known limitations
+
+- Schedule HTTP errors, unrecognized responses, detected truncation, and Muse failures now abort **before saving or pushing**. They must not be interpreted as zero games. This does not roll back a snapshot previously published by older code.
+- October 18 investigation: the Python 3.12/requests environment returned HTTP 403 from GameSheet, while system Python 3.10/requests returned HTTP 200 for the same public schedule request. `--public-python` (or `OPPORTUNITIES_PUBLIC_PYTHON`) runs only public GameSheet requests in that compatible runtime, with a fixed endpoint and no CRM credentials or inherited `PYTHONPATH`. Failed requests still abort; TLS verification remains enabled.
+- The AYHL parser ignores HTML comments, including a deprecated date cell that otherwise shifts the live date/time column.
+- Muse requires a valid OpenCode provider API key. The CLI reported `api_key_expired` during the investigation; replace that key in OpenCode Console/client configuration before trying again. Do not paste the key into this repository.
+- `--use-luna` instead uses `codex exec --model gpt-6-luna` with the existing Codex/ChatGPT account. Luna authentication, browser navigation, page snapshots and a complete single-day structured result were verified. Each shoot day must return a validated result and actual successful browser navigation + snapshot events; failed/skipped AI passes abort the refresh. Up to three days run concurrently. Only public rink/game records go to the worker, not CRM information. Coverage limitations appear on the page, and no model can guarantee that every unpublished game is found.
+- The Muse worker uses its own working directory/session context, denies shell/file modification tools and browser code execution, and has websearch/webfetch plus an isolated, headless Playwright MCP browser (`@playwright/mcp@0.0.83`, launched with `npx`). Navigation and snapshots were smoke-tested against AYHL independently of the model; successful Muse execution is still blocked by the expired key. Set `OPPORTUNITIES_BROWSER_EXECUTABLE` if automatic Chromium discovery cannot find a browser. Node/npm and an installed Chromium are local prerequisites, not Railway dependencies.
+- Coverage is not exhaustive: GameSheet seasons/regions and rink aliases are a maintained list. Essex Sports Center, Icenter Salem, Rockland Skating Rink, and Hobomock Arena now have aliases. Great American Center is a roller-hockey facility and is explicitly flagged outside the five ice-league sources instead of implying there are no games.
+- CRM indexing currently prioritizes one deal/lead per person, excludes archived leads and standalone persons without notes, and does not search all custom fields. Club/age matches are candidates, not verified squad/level matches.
+- Snapshots contain CRM/customer information. They live in ignored `var/` with private file permissions. The old tracked snapshot is removed from the current source tree, but this does **not** erase the already-public Git history. Historical privacy remediation must be coordinated separately; do not force-push rewritten history without explicit approval.
 
 ## 10. Notes / Gotchas
 

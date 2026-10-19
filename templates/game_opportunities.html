@@ -6,7 +6,7 @@
     <div>
         <h1 class="text-3xl font-bold mb-1">Game Opportunities</h1>
         <p class="text-slate-500">
-            Day-by-day shoot schedule cross-referenced against AYHL, GameSheet, AHF, THF, and FedHockey + your entire Pipedrive CRM.
+            Day-by-day shoot schedule cross-referenced against AYHL, GameSheet, AHF, THF, and FedHockey + indexed Pipedrive records.
         </p>
         {% if report.generated_at %}
         <div class="text-xs text-slate-400 mt-1">
@@ -20,6 +20,17 @@
         <a href="{% url 'edits_dashboard' %}" class="px-3 py-1.5 rounded-md text-slate-600 hover:bg-slate-50">Editors</a>
         <a href="{% url 'game_opportunities' %}" class="px-3 py-1.5 rounded-md bg-slate-900 text-white">Game Opportunities</a>
     </div>
+</div>
+
+<div class="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+    {% if report.coverage %}
+    <p>{{ report.coverage.scope }}</p>
+    <p class="mt-1">AI research: {% if report.coverage.ai_completed %}{{ report.coverage.ai_model }} completed · {{ report.coverage.ai_days_checked }} days checked{% elif report.coverage.muse_completed %}Muse completed{% else %}not completed{% endif %}.</p>
+    <p class="mt-1">{{ report.coverage.crm_scope }}</p>
+    {% else %}
+    <p>Coverage and Muse completion were not recorded for this older snapshot. Do not treat it as an exhaustive schedule.</p>
+    {% endif %}
+    <p class="mt-1">CRM matches are candidates. Confirm season, age group, and level before contacting a team.</p>
 </div>
 
 <!-- Monitored Sites Strip -->
@@ -54,7 +65,7 @@
     <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
         <div class="text-xs uppercase tracking-wide text-slate-500 mb-1">Teams Playing</div>
         <div class="text-2xl font-bold">{{ summary.unique_teams|default:0 }}</div>
-        <div class="text-xs text-slate-400 mt-0.5">unique squads</div>
+        <div class="text-xs text-slate-400 mt-0.5">unique team labels</div>
     </div>
     <div class="bg-white rounded-xl p-4 shadow-sm border border-emerald-200 bg-emerald-50/30">
         <div class="text-xs uppercase tracking-wide text-emerald-700 mb-1 font-semibold">Direct CRM Matches</div>
@@ -151,6 +162,9 @@
                 </span>
             </div>
         </div>
+        {% for warning in day.coverage_warnings %}
+        <div class="px-6 py-3 bg-amber-50 text-amber-900 text-sm border-b border-amber-200">{{ warning }}</div>
+        {% endfor %}
 
         <div class="p-6 space-y-8">
             <!-- 1. Booked Shoots for the Day -->
@@ -201,7 +215,7 @@
                     <div class="rounded-xl border border-emerald-200 overflow-hidden">
                         <div class="bg-emerald-50 px-4 py-2.5 border-b border-emerald-200 flex items-center justify-between">
                             <span class="text-xs font-bold uppercase tracking-wider text-emerald-800">
-                                Direct Matches — Club + Age Group Verified ({{ day.direct_matches|length }})
+                                Club + Age Candidates — Verify Squad/Level ({{ day.direct_matches|length }})
                             </span>
                         </div>
                         <div class="overflow-x-auto">

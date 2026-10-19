@@ -1,10 +1,12 @@
 import base64
+import hmac
 import json
 from html import escape
 import logging
 from datetime import datetime
 from django.conf import settings
 from django.contrib import messages
+from django.contrib.admin.views.decorators import staff_member_required
 from django.http import JsonResponse, HttpResponse, HttpResponseForbidden, HttpResponseBadRequest
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils import timezone
@@ -722,6 +724,7 @@ def facebook_webhook(request):
 # Game Opportunities (Day-by-day 5-site schedule + CRM lead/deal research)
 # ----------------------------------------------------------------------------
 
+@staff_member_required(login_url="/admin/login/")
 def game_opportunities(request):
     from .game_opportunities import load_saved_report
 
@@ -832,7 +835,7 @@ def sync_game_opportunities(request):
         or settings.PIPEDRIVE_WEBHOOK_SECRET
     )
     provided_secret = request.headers.get("X-Sync-Secret", "")
-    if expected_secret and provided_secret != expected_secret:
+    if not expected_secret or not hmac.compare_digest(provided_secret, expected_secret):
         return HttpResponseForbidden("Invalid sync secret")
 
     try:
@@ -849,4 +852,3 @@ def sync_game_opportunities(request):
         "generated_at": payload.get("generated_at", ""),
         "days": len(payload.get("days") or []),
     })
-

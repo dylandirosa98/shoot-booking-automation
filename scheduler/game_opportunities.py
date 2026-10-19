@@ -6,9 +6,9 @@ Day-by-day Game Opportunity Research across the 5 target hockey schedule sites:
 4. THF (https://www.tier1hockeyfederation.com/ -> api.blackbear.timetoscore.com)
 5. FedHockey / EHF (https://fedhockey.com/ -> EHF GameSheet seasons 15008 / 14728)
 
-Runs locally on the operator's machine, matches every game & team at our shoot rinks
-against the entire Pipedrive CRM (Direct matches + Maybe matches), saves to
-`scheduler/data/game_opportunities.json` + `GameOpportunitySnapshot`, and can push
+Runs locally on the operator's machine, matches public games at our shoot rinks
+against indexed Pipedrive records (club/age candidates + maybes), saves to
+ignored `var/game_opportunities.json` + `GameOpportunitySnapshot`, and can push
 results directly to the Railway deployment.
 """
 from __future__ import annotations
@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -71,7 +72,12 @@ def _redact_pii(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-DATA_FILE = Path(__file__).resolve().parent / "data" / "game_opportunities.json"
+
+class ScheduleResearchError(RuntimeError):
+    """A source failed; do not save or publish this incomplete refresh."""
+
+
+DATA_FILE = Path(__file__).resolve().parent.parent / "var" / "game_opportunities.json"
 
 TARGET_SITES = [
     {"name": "AYHL", "url": "https://atlantichockey.org/ayhl.php"},
@@ -119,6 +125,11 @@ RINK_REGION = {
     "New England Sports Village": "NE",
     "Northstar Ice Sports": "NE",
     "Thayer Sports Center": "NE",
+    "Essex Sports Center": "NE",
+    "Icenter Salem": "NE",
+    "Rockland Skating Rink": "NE",
+    "Hobomock Arena": "NE",
+    "Great American Center (roller hockey)": "ROLLER",
     "Brewster Ice Arena": "NY",
     "Northwell Health Ice Center": "NY",
     "Rochester Ice Center (Fairport)": "NY",
@@ -169,6 +180,17 @@ def canonical_rink(raw_loc: str, league_context: str = "") -> str | None:
     ctx = (league_context or "").lower()
     if not s:
         return None
+    if "essex sports center" in s or "essex sports complex" in s:
+        return "Essex Sports Center"
+    if ("icenter" in s or "i-center" in s or "i center" in s) and "salem" in s:
+        return "Icenter Salem"
+    if "rockland skating" in s or "rockland ice rink" in s:
+        return "Rockland Skating Rink"
+    # Northstar operates Hobomock too; it is not the Westborough facility.
+    if "hobomock" in s:
+        return "Hobomock Arena"
+    if "great american center" in s:
+        return "Great American Center (roller hockey)"
     if "new england sports center" in s or re.search(r"\bnesc\b", s):
         return "New England Sports Center"
     if "red bank armory" in s:
@@ -589,12 +611,18 @@ def fetch_ayhl_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
     try:
         resp = requests.get("https://atlantichockey.org/full_schedule.php", headers=USER_AGENT, timeout=25)
         resp.raise_for_status()
+        # AYHL retains a deprecated <td> inside an HTML comment. Regexes must
+        # not count it as a live cell or the date/time column shifts.
+        html = re.sub(r"<!--.*?-->", "", resp.text, flags=re.S)
         m_tbl = re.search(
             r'<table[^>]*id="schedule_table"[^>]*class="w3-hide-small"[^>]*>(.*?)</table>',
-            resp.text,
+            html,
             re.S | re.I,
         )
-        table_html = m_tbl.group(1) if m_tbl else resp.text
+        if not m_tbl:
+            raise ValueError("schedule table not found")
+        table_html = m_tbl.group(1)
+        parsed_rows = 0
         for tr_html in re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.S | re.I):
             tds = [
                 _html_to_text(td, sep=" ").strip()
@@ -612,6 +640,7 @@ def fetch_ayhl_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
             if not m:
                 continue
             dt_obj = datetime.strptime(m.group(1) + " " + m.group(2).upper(), "%m/%d/%y %I:%M %p")
+            parsed_rows += 1
             day_iso = dt_obj.date().isoformat()
             if day_iso not in shoots_by_day:
                 continue
@@ -630,8 +659,10 @@ def fetch_ayhl_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
                 "site": "AYHL",
                 "source_url": f"https://atlantichockey.org/game_preview.php?gameid={game_num}" if game_num.isdigit() else "https://atlantichockey.org/full_schedule.php",
             })
+        if not parsed_rows:
+            raise ValueError("no schedule rows could be parsed")
     except Exception as exc:
-        logger.warning("AYHL schedule fetch error: %s", exc)
+        raise ScheduleResearchError(f"AYHL schedule failed ({type(exc).__name__}); refresh aborted.") from exc
     return games
 
 
@@ -643,7 +674,7 @@ def fetch_ahf_thf_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
         resp.raise_for_status()
         m_sec = re.search(r'data-api-secret="([^"]+)"', resp.text)
         if not m_sec:
-            return games
+            raise ValueError("public API configuration not found")
         secret = codecs.decode(m_sec.group(1), "rot13")
 
         def fetch_day(day_iso: str) -> list[dict]:
@@ -665,7 +696,10 @@ def fetch_ahf_thf_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
             url = f"https://api.blackbear.timetoscore.com/get_schedule_lite?{query}&auth_signature={sig}"
             r = requests.get(url, headers=USER_AGENT, timeout=20)
             r.raise_for_status()
-            return r.json().get("games", [])
+            payload = r.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("games"), list):
+                raise ValueError("invalid schedule response")
+            return payload["games"]
 
         for day_iso in sorted(shoots_by_day):
             for row in fetch_day(day_iso):
@@ -707,7 +741,7 @@ def fetch_ahf_thf_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
                     "source_url": f"{site_base}?{ref}",
                 })
     except Exception as exc:
-        logger.warning("AHF/THF schedule fetch error: %s", exc)
+        raise ScheduleResearchError(f"AHF/THF schedule failed ({type(exc).__name__}); refresh aborted.") from exc
     return games
 
 
@@ -750,7 +784,36 @@ GAMESHEET_SEASONS = [
 ]
 
 
-def fetch_gamesheet_and_fedhockey_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
+def fetch_gamesheet_payload(day_iso: str, sid: int, public_python: str | None = None) -> dict:
+    """Fetch public schedules without mixing the Django and public HTTP runtimes."""
+    if public_python:
+        env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}}
+        try:
+            result = subprocess.run(
+                [public_python, str(Path(__file__).with_name("public_schedule_worker.py"))],
+                input=json.dumps({"date": day_iso, "season": sid}),
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            if result.returncode:
+                raise ValueError("public schedule worker failed")
+            envelope = json.loads(result.stdout)
+            status = envelope["status_code"]
+            payload = envelope["payload"]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
+            raise ScheduleResearchError(f"GameSheet public runtime failed for season {sid} on {day_iso}; refresh aborted.") from exc
+    else:
+        response = requests.get(
+            f"https://gamesheetstats.com/api/unified-games/{sid}",
+            params={"dateStart": day_iso, "dateEnd": day_iso}, timeout=12,
+        )
+        status = response.status_code
+        payload = response.json() if status == 200 else None
+    if status != 200:
+        raise ScheduleResearchError(f"GameSheet season {sid} on {day_iso}: HTTP {status}; refresh aborted.")
+    return payload
+
+
+def fetch_gamesheet_and_fedhockey_games(shoots_by_day: dict[str, list[dict]], public_python: str | None = None) -> list[dict]:
     """Sites 2 & 5: GameSheet (gamesheetinc.com) and FedHockey (fedhockey.com)."""
     games: list[dict] = []
     tasks: list[tuple[str, int, str]] = []
@@ -764,14 +827,14 @@ def fetch_gamesheet_and_fedhockey_games(shoots_by_day: dict[str, list[dict]]) ->
         day_iso, sid, label = task
         found: list[dict] = []
         try:
-            r = requests.get(
-                f"https://gamesheetstats.com/api/unified-games/{sid}",
-                params={"dateStart": day_iso, "dateEnd": day_iso},
-                timeout=12,
-            )
-            if r.status_code != 200:
-                return found
-            for g in r.json().get("data", []):
+            payload = fetch_gamesheet_payload(day_iso, sid, public_python=public_python)
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                raise ValueError("missing game data")
+            rows = payload["data"]
+            expected = (payload.get("meta") or {}).get("filtered")
+            if expected is not None and int(expected) != len(rows):
+                raise ValueError("incomplete game response")
+            for g in rows:
                 loc = g.get("location") or ""
                 rink = canonical_rink(loc, label)
                 if not rink:
@@ -800,8 +863,12 @@ def fetch_gamesheet_and_fedhockey_games(shoots_by_day: dict[str, list[dict]]) ->
                     "site": label,
                     "source_url": f"https://gamesheetstats.com/seasons/{sid}/games",
                 })
+        except ScheduleResearchError:
+            raise
         except Exception as exc:
-            logger.debug("GameSheet %s (%s) error: %s", sid, day_iso, exc)
+            raise ScheduleResearchError(
+                f"GameSheet season {sid} on {day_iso} failed ({type(exc).__name__}); refresh aborted."
+            ) from exc
         return found
 
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -834,10 +901,11 @@ def fetch_hollydell_facility_games(shoots_by_day: dict[str, list[dict]]) -> list
                     "include": "homeTeam.league.programType,visitingTeam.league.programType,summary,resource.facility,eventType",
                 }
                 r = requests.get("https://api.daysmartrecreation.com/v1/events", params=params, timeout=15)
-                if r.status_code != 200:
-                    break
+                r.raise_for_status()
                 payload = r.json()
-                rows = payload.get("data") or []
+                if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                    raise ValueError("missing event data")
+                rows = payload["data"]
                 included = {(i["type"], str(i["id"])): i for i in payload.get("included") or []}
 
                 def rel(item, name):
@@ -881,8 +949,12 @@ def fetch_hollydell_facility_games(shoots_by_day: dict[str, list[dict]]) -> list
                 if page >= int(meta_page.get("last-page") or 1):
                     break
                 page += 1
-            except Exception:
-                break
+            except Exception as exc:
+                raise ScheduleResearchError(
+                    f"Hollydell calendar on {day_iso} failed ({type(exc).__name__}); refresh aborted."
+                ) from exc
+        else:
+            raise ScheduleResearchError(f"Hollydell calendar on {day_iso} exceeded pagination limit; refresh aborted.")
     return games
 
 
@@ -892,8 +964,8 @@ def fetch_hollydell_facility_games(shoots_by_day: dict[str, list[dict]]) -> list
 
 def run_muse_spark_agent_for_day(day_iso: str, rinks: list[str]) -> list[dict]:
     """
-    Launch local Muse Spark (`opencode/muse-spark-1.3`) with websearch, webfetch,
-    and browser/bash tools enabled to find any additional games on the 5 sites.
+    Launch a separate Muse Spark worker with websearch/webfetch and an isolated
+    Playwright browser. A failed AI pass aborts the whole refresh.
     """
     model = os.environ.get("PUCKPRO_RESEARCH_MODEL", "opencode/muse-spark-1.3")
     system_prompt = (
@@ -910,24 +982,50 @@ def run_muse_spark_agent_for_day(day_iso: str, rinks: list[str]) -> list[dict]:
     )
     with tempfile.TemporaryDirectory(prefix="muse-opp-") as scratch:
         config = {
+            "mcp": {"servers": {"rinkbrowser": {
+                "type": "local",
+                "codemode": False,
+                "command": ["npx", "--yes", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--no-webmcp", "--block-service-workers"],
+            }}},
             "agents": {
                 "rink-research": {
                     "mode": "primary",
                     "steps": 25,
                     "system": system_prompt,
                     "permissions": [
+                        {"action": "*", "resource": "*", "effect": "deny"},
                         {"action": "websearch", "resource": "*", "effect": "allow"},
                         {"action": "webfetch", "resource": "https://*", "effect": "allow"},
-                        {"action": "bash", "resource": "*", "effect": "allow"},
+                        *[
+                            {"action": f"rinkbrowser_{tool}", "resource": "*", "effect": "allow"}
+                            for tool in ("browser_navigate", "browser_snapshot", "browser_click", "browser_select_option", "browser_wait_for", "browser_tabs", "browser_navigate_back", "browser_close")
+                        ],
                     ],
                 }
             }
         }
+        browser = os.environ.get("OPPORTUNITIES_BROWSER_EXECUTABLE")
+        if not browser:
+            cached = list((Path.home() / ".cache" / "ms-playwright").glob("chromium-*/chrome-linux*/chrome"))
+            browser = str(max(cached, key=lambda p: p.stat().st_mtime)) if cached else shutil.which("chromium")
+        if browser:
+            config["mcp"]["servers"]["rinkbrowser"]["command"].extend(["--executable-path", browser])
         Path(scratch, "opencode.json").write_text(json.dumps(config))
+        # Resolve this worker's config independently of the calling session.
+        # Both the session marker and logical working directory are inherited
+        # from OpenCode's shell, even when Popen has a different cwd.
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in {"OPENCODE_SESSION_ID", "OPENCODE", "OPENCODE_TERMINAL"}
+            and not k.startswith(("PIPEDRIVE_", "FACEBOOK_", "GOOGLE_", "CLICKUP_", "RAILWAY_"))
+            and k not in {"SECRET_KEY", "OPPORTUNITIES_SYNC_SECRET", "DATABASE_URL"}
+        }
+        env["PWD"] = scratch
         msg = json.dumps({"date": day_iso, "rinks": rinks, "sites": [s["url"] for s in TARGET_SITES]})
         proc = subprocess.Popen(
             ["opencode", "run", "--standalone", "--agent", "rink-research", "--model", model, "--format", "json", msg],
             cwd=scratch,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -938,30 +1036,63 @@ def run_muse_spark_agent_for_day(day_iso: str, rinks: list[str]) -> list[dict]:
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate()
-            return []
+            raise ScheduleResearchError(f"Muse timed out on {day_iso}; refresh aborted.")
         texts = []
         for line in stdout.splitlines():
             try:
                 ev = json.loads(line)
+                if ev.get("type") == "error":
+                    error = ev.get("error") or {}
+                    if error.get("type") == "provider.auth":
+                        raise ScheduleResearchError(
+                            f"Muse authentication failed on {day_iso}; check the OpenCode provider API key. Refresh aborted."
+                        )
+                    raise ScheduleResearchError(f"Muse reported an error on {day_iso}; refresh aborted.")
                 if ev.get("type") == "text":
                     texts.append(ev.get("part", {}).get("text", ""))
             except json.JSONDecodeError:
                 continue
+        if proc.returncode != 0:
+            raise ScheduleResearchError(f"Muse failed on {day_iso} (exit {proc.returncode}); refresh aborted.")
         raw = next((t.strip() for t in reversed(texts) if t.strip()), "")
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
         try:
             payload = json.loads(raw)
-            return payload.get("games") or []
-        except Exception:
-            return []
+            if not isinstance(payload, dict) or not isinstance(payload.get("games"), list):
+                raise ValueError("missing games array")
+            games = payload["games"]
+            required = {"date", "time", "away", "home", "rink", "source_url"}
+            for game in games:
+                if not isinstance(game, dict) or not required.issubset(game):
+                    raise ValueError("invalid game record")
+                if any(not isinstance(game[k], str) or not game[k].strip() for k in required):
+                    raise ValueError("invalid game field")
+                if game["date"] != day_iso or not game["source_url"].startswith("https://"):
+                    raise ValueError("wrong date or missing public source")
+            return games
+        except (ValueError, TypeError) as exc:
+            raise ScheduleResearchError(f"Muse returned invalid results on {day_iso}; refresh aborted.") from exc
 
 
 # ---------------------------------------------------------------------------
 # Main Research & CRM Matching Pipeline
 # ---------------------------------------------------------------------------
 
-def build_game_opportunities_report(target_date: str | None = None, use_muse: bool = False) -> dict:
+def rink_coverage_warnings(rinks: list[str]) -> list[str]:
+    warnings = []
+    for rink in sorted(set(rinks)):
+        region = RINK_REGION.get(rink)
+        if region == "ROLLER":
+            warnings.append(f"{rink}: not covered by the five ice-hockey sources; separate roller-hockey research is required.")
+        elif not region:
+            warnings.append(f"{rink}: unmapped facility; game coverage is incomplete.")
+    return warnings
+
+
+def build_game_opportunities_report(target_date: str | None = None, use_muse: bool = False, public_python: str | None = None, use_luna: bool = False, progress=None) -> dict:
+    if use_muse and use_luna:
+        raise ScheduleResearchError("Select one AI research provider, not both Muse and Luna.")
     _enable_ipv4_fastpath()
     token, domain = get_pipedrive_credentials()
     tz = ZoneInfo("America/New_York")
@@ -1141,8 +1272,34 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
     all_raw_games: list[dict] = []
     all_raw_games.extend(fetch_ayhl_games(shoots_by_day))
     all_raw_games.extend(fetch_ahf_thf_games(shoots_by_day))
-    all_raw_games.extend(fetch_gamesheet_and_fedhockey_games(shoots_by_day))
+    all_raw_games.extend(fetch_gamesheet_and_fedhockey_games(shoots_by_day, public_python=public_python))
     all_raw_games.extend(fetch_hollydell_facility_games(shoots_by_day))
+
+    ai_day_results = {}
+    if use_luna:
+        from .luna_research import run_luna_research_for_day
+
+        if progress:
+            progress(f"Public schedules retrieved. Starting Luna/Codex browser research for {len(shoots_by_day)} shoot days...")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {}
+            for day_iso, shoots in sorted(shoots_by_day.items()):
+                rinks = sorted({s["rink"] for s in shoots if s.get("rink")})
+                known = [g for g in all_raw_games if g["date"] == day_iso and g["rink"] in rinks]
+                futures[pool.submit(run_luna_research_for_day, day_iso, rinks, known)] = day_iso
+            for future in as_completed(futures):
+                day_iso = futures[future]
+                result = future.result()
+                ai_day_results[day_iso] = result
+                for game in result["games"]:
+                    try:
+                        game["sort_time"] = datetime.strptime(game["time"].upper(), "%I:%M %p").strftime("%H:%M")
+                    except ValueError:
+                        raise ScheduleResearchError(f"Luna returned an invalid game time on {day_iso}; refresh aborted.")
+                    game["discovery"] = "Luna/Codex"
+                    all_raw_games.append(game)
+                if progress:
+                    progress(f"Luna checked {day_iso}: {len(result['games'])} additional game candidates, {len(result['limitations'])} coverage notes ({len(ai_day_results)}/{len(shoots_by_day)} days).")
 
     if use_muse:
         for day_iso, shoots in sorted(shoots_by_day.items()):
@@ -1332,6 +1489,7 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
             "date_label": dt_label,
             "shoots": day_shoots,
             "rinks": sorted(day_rinks),
+            "coverage_warnings": rink_coverage_warnings(list(day_rinks)) + ai_day_results.get(day_iso, {}).get("limitations", []),
             "games": day_games,
             "teams": sorted(teams_map.values(), key=lambda t: (-t["direct_matches_count"], -t["maybe_matches_count"], t["name"].lower())),
             "direct_matches": direct_matches,
@@ -1342,6 +1500,14 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
         "generated_at": datetime.now(tz).strftime("%Y-%m-%d %-I:%M %p %Z"),
         "generated_iso": datetime.now(timezone.utc).isoformat(),
         "sites": TARGET_SITES,
+        "coverage": {
+            "muse_completed": use_muse,
+            "ai_completed": use_muse or use_luna,
+            "ai_model": "openai/gpt-6-luna (Codex)" if use_luna else "Muse Spark" if use_muse else "none",
+            "ai_days_checked": len(ai_day_results) if use_luna else len(shoots_by_day) if use_muse else 0,
+            "scope": "Configured public league seasons and mapped facilities; not a guarantee of exhaustive coverage.",
+            "crm_scope": "One prioritized deal/lead per person plus standalone persons with notes; archived leads and all custom fields are not indexed.",
+        },
         "summary": {
             "shoot_days": len(days_output),
             "upcoming_shoots": sum(len(d["shoots"]) for d in days_output),
@@ -1357,20 +1523,27 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
 
 
 def save_report_locally(report: dict) -> Path:
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DATA_FILE.write_text(json.dumps(report, indent=2))
-    try:
-        from .models import GameOpportunitySnapshot
+    from django.db import transaction
+    from .models import GameOpportunitySnapshot
 
-        snap, _ = GameOpportunitySnapshot.objects.update_or_create(
-            pk=1,
-            defaults={
-                "generated_at": report.get("generated_at", ""),
-                "payload": report,
-            },
-        )
-    except Exception:
-        pass
+    DATA_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pending = None
+    try:
+        # Write privately to a sibling file, not on top of the last snapshot.
+        with tempfile.NamedTemporaryFile(mode="w", dir=DATA_FILE.parent, prefix=".opportunities-", delete=False) as handle:
+            pending = Path(handle.name)
+            json.dump(report, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with transaction.atomic():
+            GameOpportunitySnapshot.objects.update_or_create(
+                pk=1,
+                defaults={"generated_at": report.get("generated_at", ""), "payload": report},
+            )
+            os.replace(pending, DATA_FILE)
+    finally:
+        if pending and pending.exists():
+            pending.unlink()
     return DATA_FILE
 
 

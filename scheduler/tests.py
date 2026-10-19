@@ -1023,6 +1023,12 @@ class FacebookLeadWebhookTests(TestCase):
 
 class GameOpportunitiesTests(TestCase):
     def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        self.opportunity_user = get_user_model().objects.create_user(
+            username="opportunity-reviewer", is_staff=True,
+        )
+        self.client.force_login(self.opportunity_user)
         self.sample_report = {
             "generated_at": "2026-10-15 10:00 AM EDT",
             "generated_iso": "2099-10-15T14:00:00+00:00",
@@ -1158,6 +1164,43 @@ class GameOpportunitiesTests(TestCase):
             ],
         }
 
+    def test_opportunities_requires_staff_login(self):
+        self.client.logout()
+        response = self.client.get("/opportunities/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response.url)
+
+    def test_unconfigured_sync_rejects_uploads(self):
+        with override_settings(PIPEDRIVE_WEBHOOK_SECRET=""):
+            with patch.dict("os.environ", {"OPPORTUNITIES_SYNC_SECRET": ""}):
+                with patch("scheduler.game_opportunities.save_report_locally"):
+                    response = self.client.post(
+                        "/api/opportunities/sync/", data=json.dumps(self.sample_report),
+                        content_type="application/json",
+                    )
+        self.assertEqual(response.status_code, 403)
+
+    def test_snapshot_storage_failure_is_not_reported_as_success(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from django.db import DatabaseError
+        from .game_opportunities import save_report_locally
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            path.write_text('{"previous": true}')
+            with patch("scheduler.game_opportunities.DATA_FILE", path):
+                with patch("scheduler.models.GameOpportunitySnapshot.objects.update_or_create", side_effect=DatabaseError("unavailable")):
+                    with self.assertRaises(DatabaseError):
+                        save_report_locally(self.sample_report)
+            self.assertEqual(path.read_text(), '{"previous": true}')
+
+    def test_snapshot_display_name_accepts_string_timestamp(self):
+        from .models import GameOpportunitySnapshot
+
+        snapshot = GameOpportunitySnapshot(generated_at="2026-10-18 8:33 PM EDT")
+        self.assertIn("2026-10-18", str(snapshot))
+
     def test_opportunities_page_renders_days_games_teams_and_crm_matches(self):
         from .models import GameOpportunitySnapshot
 
@@ -1185,7 +1228,7 @@ class GameOpportunitiesTests(TestCase):
         from pathlib import Path
         from .models import GameOpportunitySnapshot
 
-        with override_settings(PIPEDRIVE_WEBHOOK_SECRET="sync-secret"):
+        with override_settings(PIPEDRIVE_WEBHOOK_SECRET="sync-secret"), patch.dict("os.environ", {"OPPORTUNITIES_SYNC_SECRET": "sync-secret"}):
             forbidden = self.client.post(
                 "/api/opportunities/sync/",
                 data=json.dumps(self.sample_report),
@@ -1218,5 +1261,3 @@ class GameOpportunitiesTests(TestCase):
         self.assertIn("14u", extract_ages("Hollydell Hurricanes 14UAA"))
         self.assertIn("12u", extract_ages("NJ Rockets 2014 AAA Major"))
         self.assertEqual(resolve_club_rule("Rocket Hockey Clubs 14GRY")[0], "New Jersey Rockets")
-
-

@@ -9,3 +9,5 @@ staticfiles/
 .vscode/
 .idea/
 google_token.json
+/var/
+/scheduler/data/*.json

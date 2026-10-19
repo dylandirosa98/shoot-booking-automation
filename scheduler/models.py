@@ -326,5 +326,5 @@ class GameOpportunitySnapshot(models.Model):
         verbose_name_plural = "Game Opportunity Snapshots"
 
     def __str__(self):
-        return f"Game Opportunity Snapshot ({self.generated_at or self.updated_at:%Y-%m-%d %H:%M})"
-
+        timestamp = self.generated_at or (self.updated_at.strftime("%Y-%m-%d %H:%M") if self.updated_at else "unsaved")
+        return f"Game Opportunity Snapshot ({timestamp})"
