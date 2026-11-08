@@ -852,3 +852,61 @@ def sync_game_opportunities(request):
         "generated_at": payload.get("generated_at", ""),
         "days": len(payload.get("days") or []),
     })
+
+
+# ---------------------------------------------------------------------------
+# Footage app feed (PuckPro footage platform)
+# ---------------------------------------------------------------------------
+# A private, read-only list of shoots from 45 days ago to 180 days ahead, so the footage app can give each
+# videographer their own schedule and upload page. Protected by FOOTAGE_FEED_SECRET
+# (header "Authorization: Bearer <secret>"). Changes nothing here.
+FOOTAGE_FEED_PAST_DAYS = 45
+FOOTAGE_FEED_FUTURE_DAYS = 180
+
+
+def footage_feed(request):
+    import os
+    from datetime import timedelta
+    from django.utils.html import strip_tags
+
+    if request.method != "GET":
+        return JsonResponse({"error": "GET only"}, status=405)
+    secret = os.getenv("FOOTAGE_FEED_SECRET", "")
+    provided = request.headers.get("Authorization", "")
+    if not secret or not hmac.compare_digest(provided.encode(), f"Bearer {secret}".encode()):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    now = timezone.now()
+    shoots = (
+        Shoot.objects.filter(
+            shoot_datetime__gte=now - timedelta(days=FOOTAGE_FEED_PAST_DAYS),
+            shoot_datetime__lte=now + timedelta(days=FOOTAGE_FEED_FUTURE_DAYS),
+        )
+        .select_related("confirmed_videographer")
+        .order_by("shoot_datetime")[:3000]
+    )
+
+    def person(v):
+        if not v:
+            return None
+        return {"id": v.id, "name": v.name, "email": v.email, "phone": v.phone}
+
+    return JsonResponse({
+        "generatedAt": now.isoformat(),
+        "shoots": [
+            {
+                "id": s.id,
+                "status": s.status,  # pending | confirmed | failed | cancelled
+                "title": s.title,
+                "location": s.location,
+                "startsAt": s.shoot_datetime.isoformat(),
+                "durationMinutes": s.duration_minutes,
+                "notes": strip_tags(s.notes or "").strip()[:2000],
+                "pipedriveActivityId": s.pipedrive_activity_id,
+                "pipedriveDealId": s.pipedrive_deal_id,
+                # Only a confirmed shoot has a videographer filming it.
+                "videographer": person(s.confirmed_videographer) if s.status == "confirmed" else None,
+            }
+            for s in shoots
+        ],
+    })
