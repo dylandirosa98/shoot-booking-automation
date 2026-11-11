@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Game Opportunities refresh every Wednesday morning
+
+[Timer]
+OnCalendar=Wed *-*-* 06:00:00 America/New_York
+# If the computer was off/asleep at 6 AM Wednesday, run as soon as it is back.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

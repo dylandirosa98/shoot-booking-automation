@@ -1,0 +1,14 @@
+[Unit]
+Description=PuckPro Game Opportunities weekly refresh (schedules + CRM matching + Mistral Vibe research)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dylandirosa/PuckProMedia/videographer-scheduling-automation
+ExecStart=/home/dylandirosa/PuckProMedia/videographer-scheduling-automation/scripts/run_weekly_opportunities.sh
+# 14+ shoot days x up to 15 min of Vibe research, 3 days at a time.
+TimeoutStartSec=3h
+KillMode=control-group
+UMask=0077
+Nice=5

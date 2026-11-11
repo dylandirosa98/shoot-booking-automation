@@ -215,38 +215,59 @@ The **Game Opportunities** tab (`/opportunities/`) requires staff login through 
 
 along with team labels and candidate CRM matches (**Direct Matches** + **Maybe Matches**). See the coverage limitations below.
 
-### Running locally & syncing to Railway
+### Weekly automation (every Wednesday)
+
+A user-level systemd timer runs the full refresh every **Wednesday at 6:00 AM ET** (`Persistent=true`, so a missed run happens as soon as the computer is back on):
 
 ```bash
-# Run locally across upcoming shoot days and save privately to var/game_opportunities.json + DB
-python manage.py research_game_opportunities
-
-# Require the local Muse Spark web research pass to succeed
-python manage.py research_game_opportunities --use-muse
-
-# Push only after successful schedule retrieval and Muse research
-python manage.py research_game_opportunities --use-muse --push
-
-# Recommended: Luna via existing Codex/ChatGPT login, bypassing expired Muse credentials.
-# This machine's verified GameSheet-compatible public HTTP runtime:
-PYTHONPATH=venv/lib/python3.12/site-packages \
-  /home/dylandirosa/.local/bin/python3.12 manage.py research_game_opportunities \
-  --use-luna --public-python /usr/bin/python3 --push
+systemctl --user list-timers game-opportunities-weekly.timer   # next run
+systemctl --user start game-opportunities-weekly.service       # run now
+journalctl --user -u game-opportunities-weekly.service -f      # watch
+ls var/logs/                                                   # per-run logs (last 26 kept)
 ```
 
-Railway reads its database snapshot, populated by `POST /api/opportunities/sync/` (authenticated with `X-Sync-Secret` matching `OPPORTUNITIES_SYNC_SECRET` or the legacy `PIPEDRIVE_WEBHOOK_SECRET`). Uploads fail closed when neither secret is configured. The publisher and server must share the same secret. Snapshots are no longer bundled in deployments; preserve the production database and verify a snapshot exists before deploying this change.
+Unit files live in `deploy/systemd/` (installed copies in `~/.config/systemd/user/`). The service runs `scripts/run_weekly_opportunities.sh`, which executes:
 
-### Refresh safety and known limitations
+```bash
+python manage.py research_game_opportunities --use-vibe --push --fail-on-partial
+```
 
-- Schedule HTTP errors, unrecognized responses, detected truncation, and Muse failures now abort **before saving or pushing**. They must not be interpreted as zero games. This does not roll back a snapshot previously published by older code.
-- October 18 investigation: the Python 3.12/requests environment returned HTTP 403 from GameSheet, while system Python 3.10/requests returned HTTP 200 for the same public schedule request. `--public-python` (or `OPPORTUNITIES_PUBLIC_PYTHON`) runs only public GameSheet requests in that compatible runtime, with a fixed endpoint and no CRM credentials or inherited `PYTHONPATH`. Failed requests still abort; TLS verification remains enabled.
-- The AYHL parser ignores HTML comments, including a deprecated date cell that otherwise shifts the live date/time column.
-- Muse requires a valid OpenCode provider API key. The CLI reported `api_key_expired` during the investigation; replace that key in OpenCode Console/client configuration before trying again. Do not paste the key into this repository.
-- `--use-luna` instead uses `codex exec --model gpt-6-luna` with the existing Codex/ChatGPT account. Luna authentication, browser navigation, page snapshots and a complete single-day structured result were verified. Each shoot day must return a validated result and actual successful browser navigation + snapshot events; failed/skipped AI passes abort the refresh. Up to three days run concurrently. Only public rink/game records go to the worker, not CRM information. Coverage limitations appear on the page, and no model can guarantee that every unpublished game is found.
-- The Muse worker uses its own working directory/session context, denies shell/file modification tools and browser code execution, and has websearch/webfetch plus an isolated, headless Playwright MCP browser (`@playwright/mcp@0.0.83`, launched with `npx`). Navigation and snapshots were smoke-tested against AYHL independently of the model; successful Muse execution is still blocked by the expired key. Set `OPPORTUNITIES_BROWSER_EXECUTABLE` if automatic Chromium discovery cannot find a browser. Node/npm and an installed Chromium are local prerequisites, not Railway dependencies.
-- Coverage is not exhaustive: GameSheet seasons/regions and rink aliases are a maintained list. Essex Sports Center, Icenter Salem, Rockland Skating Rink, and Hobomock Arena now have aliases. Great American Center is a roller-hockey facility and is explicitly flagged outside the five ice-league sources instead of implying there are no games.
-- CRM indexing currently prioritizes one deal/lead per person, excludes archived leads and standalone persons without notes, and does not search all custom fields. Club/age matches are candidates, not verified squad/level matches.
-- Snapshots contain CRM/customer information. They live in ignored `var/` with private file permissions. The old tracked snapshot is removed from the current source tree, but this does **not** erase the already-public Git history. Historical privacy remediation must be coordinated separately; do not force-push rewritten history without explicit approval.
+Pipeline: Pipedrive (upcoming `shoot_booking` activities + all deals/leads/persons/notes) → schedule collectors for the shoot days → Mistral Vibe web research per shoot day → club + age-group matching against the CRM → `var/game_opportunities.json` + DB snapshot → `POST /api/opportunities/sync/` on Railway. Matches not present in the previous snapshot are marked **New** on the page.
+
+### Running manually
+
+```bash
+PYTHONPATH=venv/lib/python3.12/site-packages ~/.local/bin/python3.12 manage.py research_game_opportunities [flags]
+#   --use-vibe          Mistral Vibe CLI web-research pass per shoot day (recommended)
+#   --use-luna / --use-muse   alternative AI providers (Codex / OpenCode)
+#   --push              push to Railway after saving
+#   --date YYYY-MM-DD   one shoot day;  --horizon-days N   only the next N days
+#   --strict            abort without saving if any schedule source fails
+#   --fail-on-partial   exit 2 (after saving/pushing) if any schedule source failed
+```
+
+Railway reads its database snapshot, populated by `POST /api/opportunities/sync/` (authenticated with `X-Sync-Secret` matching `OPPORTUNITIES_SYNC_SECRET` or the legacy `PIPEDRIVE_WEBHOOK_SECRET`). Uploads fail closed when neither secret is configured.
+
+### Sources and how they are fetched (verified 2026-11-10)
+
+| Source | Method |
+|---|---|
+| AYHL | WordPress REST API `atlantichockey.org/wp-json/ayhl/v1/schedule?season=&league=` (the old `full_schedule.php` was removed in the Oct 2026 site rebuild) |
+| AHF / THF | BlackBear TimeToScore signed `get_schedule_lite` API (key read from the AHF schedule page) |
+| GameSheet / FedHockey | Cloudflare now JS-challenges every request, so `scheduler/public_schedule_worker.py` runs headless Chromium (Playwright under `/usr/bin/python3`), one fresh browser context per season, one date-range API call each |
+| Hollydell | DaySmart public events API |
+| Mistral Vibe | `vibe --prompt-file … --agent rink-research --output json` per shoot day |
+
+### Reliability model
+
+- **Each source is isolated.** One site failing no longer discards the others: the report is saved with a red "Partial refresh" banner and a per-day warning naming the missing source, so a failed source is never mistaken for "no games". If *every* source fails (network down) or Pipedrive fails, nothing is saved. `--strict` restores all-or-nothing behaviour.
+- GameSheet: a single retired/blocked season is a warning; the source fails only when half or more of its seasons fail. AYHL refuses truncated API responses.
+- HTTP calls retry with backoff on timeouts/429/5xx. Pipedrive errors never print the request URL (it carries the API token).
+- **Unmapped rinks**: a shoot address that `canonical_rink` does not recognise is registered for that run by its facility name (plus any parenthetical name and a 2-word core, e.g. "Clark Gillies Arena (Dix Hills Ice Rink)" → "dix hills"), with the region taken from the address's state. League venues with the same name then match. Add a static alias in `canonical_rink` if a league spells a rink differently.
+- **Vibe pass** (`scheduler/vibe_research.py`): the managed agent profile `~/.vibe/agents/rink-research.toml` disables every local tool (shell, process, file read/write/edit, subagents, MCP) so only `connector_web_search.web_search` / `open_url` can run; this was verified from the Vibe session journal (`tool_denied` for bash and read_file). Only public rink/game data is sent — no CRM names, notes, IDs or credentials; the subprocess env is an allowlist. Games are kept only with the right date/rink, an https source **that Vibe actually opened in that session**, and a quoted excerpt. A failed/timed-out day becomes a coverage note; it never discards schedule results. Vibe reads its Mistral key from the desktop keyring; if the keyring is locked (nobody logged in), put `MISTRAL_API_KEY=` in `~/.config/game-opportunities/env` (chmod 600).
+- Coverage is not exhaustive: GameSheet seasons are a maintained list (`GAMESHEET_SEASONS`), and club rules (`CLUB_RULES`) are hand-curated. Club/age matches are candidates, not verified squad/level matches.
+- CRM indexing prioritises one deal/lead per person, excludes archived leads and standalone persons without notes, and does not search custom fields.
+- Snapshots contain CRM/customer information. They live in ignored `var/` with private file permissions. The old tracked snapshot is removed from the current source tree, but this does **not** erase the already-public Git history; coordinate any history rewrite separately.
 
 ## 10. Notes / Gotchas
 

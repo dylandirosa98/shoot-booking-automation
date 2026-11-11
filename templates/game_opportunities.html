@@ -22,10 +22,26 @@
     </div>
 </div>
 
+{% if report.source_status %}
+<div class="mb-4 rounded-lg border {% if report.complete %}border-emerald-200 bg-emerald-50 text-emerald-900{% else %}border-red-200 bg-red-50 text-red-900{% endif %} p-4 text-sm">
+    <p class="font-semibold">{% if report.complete %}All schedule sources refreshed successfully.{% else %}Partial refresh — some sources failed, so games from them are missing below.{% endif %}</p>
+    <div class="mt-2 flex flex-wrap gap-2 text-xs">
+        {% for src in report.source_status %}
+        <span class="px-2 py-0.5 rounded-full {% if src.status == 'ok' %}bg-emerald-100 text-emerald-800{% else %}bg-red-100 text-red-800{% endif %}" title="{{ src.error }}">
+            {{ src.source }}: {% if src.status == 'ok' %}{{ src.games }} games{% else %}FAILED{% endif %}
+        </span>
+        {% endfor %}
+    </div>
+    {% for w in report.source_warnings %}<p class="mt-1 text-xs">{{ w }}</p>{% endfor %}
+    {% if summary.new_matches is not None %}<p class="mt-2 text-xs">{{ summary.new_matches }} match{{ summary.new_matches|pluralize:"es" }} new since the previous refresh{% if report.previous_generated_at %} ({{ report.previous_generated_at }}){% endif %}.</p>{% endif %}
+</div>
+{% endif %}
+
 <div class="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
     {% if report.coverage %}
     <p>{{ report.coverage.scope }}</p>
-    <p class="mt-1">AI research: {% if report.coverage.ai_completed %}{{ report.coverage.ai_model }} completed · {{ report.coverage.ai_days_checked }} days checked{% elif report.coverage.muse_completed %}Muse completed{% else %}not completed{% endif %}.</p>
+    <p class="mt-1">AI web research ({{ report.coverage.ai_model|default:"none" }}):
+        {% if report.coverage.ai_days_checked or report.coverage.ai_days_failed %}{{ report.coverage.ai_days_checked|default:0 }} days checked{% if report.coverage.ai_days_failed %}, <strong>{{ report.coverage.ai_days_failed }} failed</strong>{% endif %} · {{ report.coverage.ai_games_added|default:0 }} extra game candidates found{% elif report.coverage.ai_completed %}completed · {{ report.coverage.ai_days_checked }} days checked{% else %}not run{% endif %}.</p>
     <p class="mt-1">{{ report.coverage.crm_scope }}</p>
     {% else %}
     <p>Coverage and Muse completion were not recorded for this older snapshot. Do not treat it as an exhaustive schedule.</p>
@@ -236,6 +252,7 @@
                                                 <a href="{{ m.crm_url }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-900 hover:text-blue-600 underline">
                                                     {{ m.crm_title }} ↗
                                                 </a>
+                                                {% if m.is_new %}<span class="px-1.5 py-0.5 rounded bg-fuchsia-100 text-fuchsia-800 text-[11px] font-semibold uppercase">New</span>{% endif %}
                                                 {% if m.crm_status == "open" %}
                                                 <span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[11px] font-semibold uppercase">Open</span>
                                                 {% elif m.crm_status == "won" %}
@@ -309,6 +326,7 @@
                                                 <a href="{{ m.crm_url }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-900 hover:text-blue-600 underline">
                                                     {{ m.crm_title }} ↗
                                                 </a>
+                                                {% if m.is_new %}<span class="px-1.5 py-0.5 rounded bg-fuchsia-100 text-fuchsia-800 text-[11px] font-semibold uppercase">New</span>{% endif %}
                                                 {% if m.crm_status == "open" %}
                                                 <span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[11px] font-semibold uppercase">Open</span>
                                                 {% elif m.crm_status == "won" %}
@@ -432,7 +450,7 @@
                             <tbody class="divide-y divide-slate-100">
                                 {% for g in day.games %}
                                 <tr class="hover:bg-slate-50">
-                                    <td class="px-4 py-2.5 font-semibold text-slate-900 whitespace-nowrap">{{ g.time }}</td>
+                                    <td class="px-4 py-2.5 font-semibold text-slate-900 whitespace-nowrap">{{ g.time }}{% if g.discovery %}<div class="text-[10px] font-medium text-violet-600" title="{{ g.source_excerpt }}">found by {{ g.discovery }}</div>{% endif %}</td>
                                     <td class="px-4 py-2.5 text-xs text-slate-600">
                                         <div class="font-medium text-slate-800">{{ g.rink }}</div>
                                         {% if g.published_venue and g.published_venue != g.rink %}

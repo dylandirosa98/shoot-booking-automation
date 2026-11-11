@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import codecs
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -92,7 +92,44 @@ CREDENTIAL_ENV_PATHS = [
     Path("/home/dylandirosa/PuckProMedia/puckpro-sales-automation/.env"),
 ]
 
-USER_AGENT = {"User-Agent": "Mozilla/5.0 (compatible; PuckProResearch/1.0)"}
+# Generic browser headers: Cloudflare-fronted league sites 403 unknown bot agents.
+USER_AGENT = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _short_error(exc: BaseException) -> str:
+    """One-line, credential-free description of a source failure."""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return f"HTTP {exc.response.status_code}"
+    msg = str(exc).split("?")[0]  # never echo query strings (tokens/signatures)
+    return msg[:160]
+
+
+def http_get(url: str, *, params=None, timeout: float = 25, attempts: int = 3, headers=None) -> requests.Response:
+    """GET with retry/backoff on transient network errors and 429/5xx."""
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            resp = requests.get(url, params=params, headers=headers or USER_AGENT, timeout=timeout)
+            if resp.status_code in RETRY_STATUSES and attempt < attempts - 1:
+                time.sleep(2 ** attempt * 1.5)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last = exc
+            if attempt < attempts - 1:
+                time.sleep(2 ** attempt * 1.5)
+    raise last or RuntimeError("request failed")
+
+
+def http_get_json(url: str, **kwargs):
+    return http_get(url, **kwargs).json()
 
 # Force IPv4 resolution when outbound IPv6 is unavailable on local Linux hosts
 _ORIG_GETADDRINFO = socket.getaddrinfo
@@ -174,8 +211,75 @@ RINK_REGION = {
 }
 
 
+STATE_REGION = {
+    "MA": "NE", "NH": "NE", "RI": "NE", "CT": "NE", "ME": "NE", "VT": "NE",
+    "NY": "NY",
+    "NJ": "MID", "PA": "MID", "DE": "MID", "MD": "MID", "DC": "MID", "VA": "MID",
+}
+_GENERIC_VENUE_WORDS = {
+    "ice", "rink", "rinks", "arena", "arenas", "center", "sports", "complex", "skating", "llc", "inc",
+    "the", "and", "of", "at", "club", "facility", "hockey", "house", "gardens",
+}
+# Facilities taken from this run's shoot addresses that no static rule knows.
+# name -> {"region": ..., "aliases": [...]}; reset by build_game_opportunities_report.
+_DYNAMIC_RINKS: dict[str, dict] = {}
+
+
+def _norm_venue(text: str) -> str:
+    s = (text or "").lower().replace("centre", "center").replace("&", " and ")
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    return " ".join(s.split())
+
+
+def register_shoot_facility(location: str) -> str | None:
+    """Register an unrecognized shoot address's facility so same-named league venues match it.
+
+    "Clark Gillies Arena (Dix Hills Ice Rink), Vanderbilt Parkway, Dix Hills, NY, USA"
+    -> "Clark Gillies Arena (Dix Hills Ice Rink)" with aliases "clark gillies arena",
+    "dix hills ice rink", "clark gillies", "dix hills" and region NY.
+    """
+    parts = [p.strip() for p in (location or "").split(",") if p.strip()]
+    if len(parts) < 2 or re.match(r"^\d", parts[0]):
+        return None  # bare street address or region only ("Florida, USA")
+    state = next(
+        (m.group(1) for p in parts[1:] for m in [re.fullmatch(r"([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?", p)] if m and m.group(1) in STATE_REGION),
+        None,
+    )
+    if not state:
+        return None
+    name = " ".join(parts[0].split())
+    pieces = [re.sub(r"\([^)]*\)", " ", name)] + re.findall(r"\(([^)]+)\)", name)
+    aliases: set[str] = set()
+    for piece in pieces:
+        full = _norm_venue(piece)
+        if len(full) >= 6 and len(full.split()) >= 2:
+            aliases.add(full)
+        core = [w for w in full.split() if w not in _GENERIC_VENUE_WORDS]
+        if len(core) >= 2:
+            aliases.add(" ".join(core))
+    if not aliases:
+        return None
+    _DYNAMIC_RINKS[name] = {"region": STATE_REGION[state], "aliases": sorted(aliases, key=len, reverse=True)}
+    return name
+
+
+def rink_region(rink: str) -> str | None:
+    return RINK_REGION.get(rink) or (_DYNAMIC_RINKS.get(rink) or {}).get("region")
+
+
 def canonical_rink(raw_loc: str, league_context: str = "") -> str | None:
     """Map Pipedrive shoot addresses and league venue strings to a canonical facility."""
+    found = _static_canonical_rink(raw_loc, league_context)
+    if found or not _DYNAMIC_RINKS:
+        return found
+    norm = f" {_norm_venue(raw_loc)} "
+    for name, info in _DYNAMIC_RINKS.items():
+        if any(f" {alias} " in norm for alias in info["aliases"]):
+            return name
+    return None
+
+
+def _static_canonical_rink(raw_loc: str, league_context: str = "") -> str | None:
     s = " ".join((raw_loc or "").lower().split())
     ctx = (league_context or "").lower()
     if not s:
@@ -354,19 +458,23 @@ def pipedrive_get_all(token: str, domain: str, resource: str, **filters) -> list
     rows: list[dict] = []
     start = 0
     cursor = None
-    for _ in range(100):
+    for _ in range(400):
         params = {"api_token": token, "limit": 500, **filters}
         if cursor:
             params["cursor"] = cursor
         else:
             params["start"] = start
-        resp = requests.get(
-            f"https://{domain}.pipedrive.com/api/v1/{resource}",
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        try:
+            resp = http_get(
+                f"https://{domain}.pipedrive.com/api/v1/{resource}",
+                params=params, timeout=45, attempts=4, headers={"Accept": "application/json"},
+            )
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            # Never let the request URL (which carries api_token) reach logs.
+            raise ScheduleResearchError(f"Pipedrive {resource} request failed ({_short_error(exc)}); refresh aborted.") from None
+        if not payload.get("success", True):
+            raise ScheduleResearchError(f"Pipedrive {resource} returned an error; refresh aborted.")
         data = payload.get("data") or []
         rows.extend(data)
         add = payload.get("additional_data") or {}
@@ -377,8 +485,8 @@ def pipedrive_get_all(token: str, domain: str, resource: str, **filters) -> list
         elif pag.get("more_items_in_collection"):
             start = pag["next_start"]
         else:
-            break
-    return rows
+            return rows
+    raise ScheduleResearchError(f"Pipedrive {resource} exceeded the pagination limit; refresh aborted.")
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +511,9 @@ YEAR_TO_AGES = {
 
 def extract_ages(text: str) -> set[str]:
     s = (text or "").lower()
+    # Phone numbers and dates end in digit groups that look like birth years.
+    s = re.sub(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b", " ", s)
+    s = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b|\b20\d\d-\d\d-\d\d\b", " ", s)
     ages: set[str] = set()
     # Match patterns like U16, 16U, 14UAA, 14AA, 12AAA, 12M, 15O, 13 Pure, 12 years old
     for m in re.finditer(
@@ -413,7 +524,8 @@ def extract_ages(text: str) -> set[str]:
         if num in {"8", "9", "10", "11", "12", "13", "14", "15", "16", "18"}:
             ages.add(f"{num}u")
     for yr, mapped in YEAR_TO_AGES.items():
-        if re.search(rf"\b{yr}\b", s):
+        # Digit-only boundaries: CRM notes often glue years to words ("Rink2016", "2014AAA").
+        if re.search(rf"(?<!\d){yr}(?!\d)", s):
             ages.update(mapped)
     for word, mapped in [
         ("mite", "8u"),
@@ -570,6 +682,16 @@ GENERIC_STOP_CLUBS = {
 }
 
 
+# Bare regions/places are not club names: matching "Jersey Shore" alone would
+# flag every CRM note that mentions the region.
+GENERIC_PLACE_NAMES = {
+    "jersey shore", "north jersey", "south jersey", "central jersey", "new jersey", "new york",
+    "long island", "new england", "south shore", "north shore", "cape cod", "lehigh valley",
+    "hudson valley", "western mass", "central mass", "rhode island", "staten island", "upstate ny",
+    "team usa", "team new england", "high school", "prep school", "all stars", "all star",
+}
+
+
 def resolve_club_rule(team_name: str) -> tuple[str, str] | None:
     """Return (club_display_name, regex_pattern) for a schedule team name."""
     raw = (team_name or "").strip()
@@ -596,7 +718,11 @@ def resolve_club_rule(team_name: str) -> tuple[str, str] | None:
     )
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -()/.,")
     words = cleaned.split()
-    if len(words) >= 2 and len(cleaned) >= 8 and cleaned.lower() not in GENERIC_STOP_CLUBS:
+    if (
+        len(words) >= 2 and len(cleaned) >= 8
+        and cleaned.lower() not in GENERIC_STOP_CLUBS
+        and cleaned.lower() not in GENERIC_PLACE_NAMES
+    ):
         return cleaned, rf"\b{re.escape(cleaned)}\b"
     return None
 
@@ -605,65 +731,68 @@ def resolve_club_rule(team_name: str) -> tuple[str, str] | None:
 # Schedule Fetchers for the 5 Sites
 # ---------------------------------------------------------------------------
 
-def fetch_ayhl_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
-    """Site 1: https://atlantichockey.org/ayhl.php (full_schedule.php)."""
+AYHL_API = "https://atlantichockey.org/wp-json/ayhl/v1"
+
+
+def parse_ayhl_schedule(payload: dict, shoots_by_day: dict[str, list[dict]]) -> list[dict]:
+    """Parse the AYHL WordPress REST schedule (`/wp-json/ayhl/v1/schedule`)."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("games"), list):
+        raise ValueError("missing games array")
+    if payload.get("possibly_truncated"):
+        raise ValueError("AYHL reported a truncated schedule")
     games: list[dict] = []
-    try:
-        resp = requests.get("https://atlantichockey.org/full_schedule.php", headers=USER_AGENT, timeout=25)
-        resp.raise_for_status()
-        # AYHL retains a deprecated <td> inside an HTML comment. Regexes must
-        # not count it as a live cell or the date/time column shifts.
-        html = re.sub(r"<!--.*?-->", "", resp.text, flags=re.S)
-        m_tbl = re.search(
-            r'<table[^>]*id="schedule_table"[^>]*class="w3-hide-small"[^>]*>(.*?)</table>',
-            html,
-            re.S | re.I,
-        )
-        if not m_tbl:
-            raise ValueError("schedule table not found")
-        table_html = m_tbl.group(1)
-        parsed_rows = 0
-        for tr_html in re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.S | re.I):
-            tds = [
-                _html_to_text(td, sep=" ").strip()
-                for td in re.findall(r"<td[^>]*>(.*?)</td>", tr_html, re.S | re.I)
-            ]
-            if len(tds) < 8:
-                continue
-            game_num = tds[0].split()[0] if tds[0] else ""
-            level = tds[1]
-            away = tds[2]
-            home = tds[4]
-            loc = tds[6]
-            dt_str = tds[7]
-            m = re.search(r"(\d{2}/\d{2}/\d{2})\s+(\d{1,2}:\d{2}\s*[AP]M)", dt_str, re.I)
-            if not m:
-                continue
-            dt_obj = datetime.strptime(m.group(1) + " " + m.group(2).upper(), "%m/%d/%y %I:%M %p")
-            parsed_rows += 1
-            day_iso = dt_obj.date().isoformat()
-            if day_iso not in shoots_by_day:
-                continue
-            rink = canonical_rink(loc, "ayhl")
-            if not rink:
-                continue
-            games.append({
-                "date": day_iso,
-                "time": dt_obj.strftime("%-I:%M %p"),
-                "sort_time": dt_obj.strftime("%H:%M"),
-                "away": away,
-                "home": home,
-                "division": level,
-                "rink": rink,
-                "published_venue": loc,
-                "site": "AYHL",
-                "source_url": f"https://atlantichockey.org/game_preview.php?gameid={game_num}" if game_num.isdigit() else "https://atlantichockey.org/full_schedule.php",
-            })
-        if not parsed_rows:
-            raise ValueError("no schedule rows could be parsed")
-    except Exception as exc:
-        raise ScheduleResearchError(f"AYHL schedule failed ({type(exc).__name__}); refresh aborted.") from exc
+    for row in payload["games"]:
+        day_iso = str(row.get("date") or "")
+        if day_iso not in shoots_by_day:
+            continue
+        if str(row.get("status") or "").lower() in {"cancelled", "canceled", "postponed"}:
+            continue
+        loc = (row.get("rink") or {}).get("name") or ""
+        rink = canonical_rink(loc, "ayhl")
+        if not rink:
+            continue
+        t = row.get("time") or {}
+        start = str(t.get("start") or "")
+        label = str(t.get("label") or "").strip()
+        sort_time = start[:5] if re.match(r"^\d{2}:\d{2}", start) else "99:99"
+        if not label and sort_time != "99:99":
+            label = datetime.strptime(sort_time, "%H:%M").strftime("%-I:%M %p")
+        away = ((row.get("away") or {}).get("name") or "").strip()
+        home = ((row.get("home") or {}).get("name") or "").strip()
+        if not away or not home:
+            continue
+        gid = row.get("id")
+        games.append({
+            "date": day_iso,
+            "time": label or "TBD",
+            "sort_time": sort_time,
+            "away": away,
+            "home": home,
+            "division": ((row.get("league") or {}).get("name") or "").strip(),
+            "rink": rink,
+            "published_venue": loc,
+            "site": "AYHL",
+            "source_url": f"https://atlantichockey.org/games/{gid}/preview/" if gid else "https://atlantichockey.org/schedule/",
+        })
     return games
+
+
+def fetch_ayhl_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
+    """Site 1: AYHL. The 2026 WordPress rebuild replaced full_schedule.php with a REST API."""
+    try:
+        # One request per league keeps each response well under the API's 1000-row limit.
+        filters = http_get_json(f"{AYHL_API}/schedule/filters")
+        season = filters.get("current_season") or filters.get("season")
+        leagues = [lg["id"] for lg in filters.get("leagues") or [] if lg.get("id")]
+        if not season or not leagues:
+            raise ValueError("AYHL season/league filters missing")
+        games: list[dict] = []
+        for league_id in leagues:
+            payload = http_get_json(f"{AYHL_API}/schedule", params={"season": season, "league": league_id})
+            games.extend(parse_ayhl_schedule(payload, shoots_by_day))
+        return games
+    except Exception as exc:
+        raise ScheduleResearchError(f"AYHL schedule failed ({type(exc).__name__}: {_short_error(exc)})") from exc
 
 
 def fetch_ahf_thf_games(shoots_by_day: dict[str, list[dict]]) -> list[dict]:
@@ -784,97 +913,169 @@ GAMESHEET_SEASONS = [
 ]
 
 
-def fetch_gamesheet_payload(day_iso: str, sid: int, public_python: str | None = None) -> dict:
-    """Fetch public schedules without mixing the Django and public HTTP runtimes."""
+_PUBLIC_PYTHON_CACHE: dict[str, str | None] = {}
+
+
+def _public_worker_env() -> dict:
+    """Minimal environment for public-schedule subprocesses: no CRM/API secrets."""
+    return {k: v for k, v in os.environ.items() if k in {
+        "PATH", "HOME", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "PLAYWRIGHT_BROWSERS_PATH", "XDG_CACHE_HOME",
+    }}
+
+
+def find_public_python(explicit: str | None = None) -> str | None:
+    """Locate a Python interpreter with Playwright for the GameSheet browser worker."""
+    candidates = [explicit, os.environ.get("OPPORTUNITIES_PUBLIC_PYTHON"), "/usr/bin/python3", shutil.which("python3")]
+    for cand in candidates:
+        if not cand:
+            continue
+        if cand not in _PUBLIC_PYTHON_CACHE:
+            try:
+                ok = subprocess.run(
+                    [cand, "-c", "import playwright.sync_api"],
+                    capture_output=True, timeout=30, env=_public_worker_env(),
+                ).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+            _PUBLIC_PYTHON_CACHE[cand] = cand if ok else None
+        if _PUBLIC_PYTHON_CACHE[cand]:
+            return cand
+    return None
+
+
+def fetch_gamesheet_batch(tasks: list[tuple[int, str, str]], public_python: str | None) -> dict[int, tuple[int, dict | None]]:
+    """Fetch GameSheet schedules for (season, start, end) ranges. Returns {season: (status, payload)}."""
+    if not tasks:
+        return {}
     if public_python:
-        env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}}
         try:
             result = subprocess.run(
                 [public_python, str(Path(__file__).with_name("public_schedule_worker.py"))],
-                input=json.dumps({"date": day_iso, "season": sid}),
-                capture_output=True, text=True, timeout=30, env=env,
+                input=json.dumps({"tasks": [{"season": s, "start": a, "end": b} for s, a, b in tasks]}),
+                capture_output=True, text=True, timeout=120 + 60 * len(tasks), env=_public_worker_env(),
             )
-            if result.returncode:
-                raise ValueError("public schedule worker failed")
-            envelope = json.loads(result.stdout)
-            status = envelope["status_code"]
-            payload = envelope["payload"]
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
-            raise ScheduleResearchError(f"GameSheet public runtime failed for season {sid} on {day_iso}; refresh aborted.") from exc
-    else:
-        response = requests.get(
-            f"https://gamesheetstats.com/api/unified-games/{sid}",
-            params={"dateStart": day_iso, "dateEnd": day_iso}, timeout=12,
-        )
-        status = response.status_code
-        payload = response.json() if status == 200 else None
-    if status != 200:
-        raise ScheduleResearchError(f"GameSheet season {sid} on {day_iso}: HTTP {status}; refresh aborted.")
-    return payload
+            envelope = json.loads(result.stdout or "{}")
+            if result.returncode or "results" not in envelope:
+                raise ValueError(f"browser worker failed ({envelope.get('error') or result.returncode})")
+            return {int(r["season"]): (int(r["status_code"]), r["payload"]) for r in envelope["results"]}
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+            raise ScheduleResearchError(f"GameSheet browser worker failed: {_short_error(exc)}") from exc
+    # No Playwright runtime: plain HTTP (works only while Cloudflare isn't challenging).
+    out: dict[int, tuple[int, dict | None]] = {}
+
+    def one(task):
+        sid, start, end = task
+        try:
+            resp = requests.get(
+                f"https://gamesheetstats.com/api/unified-games/{sid}",
+                params={"dateStart": start, "dateEnd": end}, headers=USER_AGENT, timeout=30,
+            )
+            return sid, (resp.status_code, resp.json() if resp.status_code == 200 else None)
+        except (requests.RequestException, ValueError):
+            return sid, (0, None)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for sid, res in pool.map(one, tasks):
+            out[sid] = res
+    return out
 
 
-def fetch_gamesheet_and_fedhockey_games(shoots_by_day: dict[str, list[dict]], public_python: str | None = None) -> list[dict]:
-    """Sites 2 & 5: GameSheet (gamesheetinc.com) and FedHockey (fedhockey.com)."""
-    games: list[dict] = []
-    tasks: list[tuple[str, int, str]] = []
+def _gamesheet_date(raw: str) -> str | None:
+    raw = (raw or "").strip()
+    for fmt in ("%b %d, %Y", "%Y-%m-%d", "%B %d, %Y"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_gamesheet_payload(payload: dict, sid: int, label: str, wanted_days: set[str], fallback_day: str | None = None) -> list[dict]:
+    """Parse a GameSheet unified-games response, keeping games on wanted_days."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("missing game data")
+    rows = payload["data"]
+    expected = (payload.get("meta") or {}).get("filtered")
+    if expected is not None and int(expected) != len(rows):
+        raise ValueError("incomplete game response")
+    found: list[dict] = []
+    for g in rows:
+        day_iso = _gamesheet_date(g.get("date") or "") or fallback_day
+        if not day_iso or day_iso not in wanted_days:
+            continue
+        if str(g.get("status") or "").lower() in {"cancelled", "canceled", "postponed"}:
+            continue
+        loc = g.get("location") or ""
+        rink = canonical_rink(loc, label)
+        if not rink:
+            continue
+        raw_time = (g.get("time") or "").strip()
+        sort_t = "99:99"
+        if raw_time:
+            try:
+                sort_t = datetime.strptime(raw_time.upper(), "%I:%M %p").strftime("%H:%M")
+            except ValueError:
+                sort_t = raw_time[:5]
+        visitor = (g.get("visitor") or {}).get("title") or ""
+        home = (g.get("home") or {}).get("title") or ""
+        div = ((g.get("home") or {}).get("division") or {}).get("title") or ""
+        if not visitor or not home:
+            continue
+        found.append({
+            "date": day_iso,
+            "time": raw_time or "TBD",
+            "sort_time": sort_t,
+            "away": visitor.strip(),
+            "home": home.strip(),
+            "division": div.strip(),
+            "rink": rink,
+            "published_venue": loc,
+            "site": label,
+            "source_url": f"https://gamesheetstats.com/seasons/{sid}/games",
+        })
+    return found
+
+
+def fetch_gamesheet_and_fedhockey_games(
+    shoots_by_day: dict[str, list[dict]],
+    public_python: str | None = None,
+    warnings: list[str] | None = None,
+) -> list[dict]:
+    """Sites 2 & 5: GameSheet (gamesheetinc.com) and FedHockey (fedhockey.com).
+
+    One request per relevant season covering the whole shoot-day range. A
+    single retired/blocked season becomes a warning; the source only fails when
+    most seasons fail.
+    """
+    season_days: dict[int, set[str]] = {}
+    labels: dict[int, str] = {}
     for day_iso, shoots in sorted(shoots_by_day.items()):
-        day_regions = {RINK_REGION.get(s["rink"]) for s in shoots if s.get("rink")}
+        day_regions = {rink_region(s["rink"]) for s in shoots if s.get("rink")}
         for sid, label, regions in GAMESHEET_SEASONS:
             if day_regions & regions:
-                tasks.append((day_iso, sid, label))
-
-    def _fetch_one(task: tuple[str, int, str]) -> list[dict]:
-        day_iso, sid, label = task
-        found: list[dict] = []
+                season_days.setdefault(sid, set()).add(day_iso)
+                labels[sid] = label
+    if not season_days:
+        return []
+    tasks = [(sid, min(days), max(days)) for sid, days in season_days.items()]
+    results = fetch_gamesheet_batch(tasks, public_python)
+    games: list[dict] = []
+    failures: list[str] = []
+    for sid, start, end in tasks:
+        status, payload = results.get(sid, (0, None))
+        if status != 200:
+            failures.append(f"season {sid} ({labels[sid]}): HTTP {status}")
+            continue
         try:
-            payload = fetch_gamesheet_payload(day_iso, sid, public_python=public_python)
-            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-                raise ValueError("missing game data")
-            rows = payload["data"]
-            expected = (payload.get("meta") or {}).get("filtered")
-            if expected is not None and int(expected) != len(rows):
-                raise ValueError("incomplete game response")
-            for g in rows:
-                loc = g.get("location") or ""
-                rink = canonical_rink(loc, label)
-                if not rink:
-                    continue
-                raw_time = (g.get("time") or "").strip()
-                sort_t = "99:99"
-                if raw_time:
-                    try:
-                        sort_t = datetime.strptime(raw_time.upper(), "%I:%M %p").strftime("%H:%M")
-                    except ValueError:
-                        sort_t = raw_time[:5]
-                visitor = (g.get("visitor") or {}).get("title") or ""
-                home = (g.get("home") or {}).get("title") or ""
-                div = ((g.get("home") or {}).get("division") or {}).get("title") or ""
-                if not visitor or not home:
-                    continue
-                found.append({
-                    "date": day_iso,
-                    "time": raw_time or "TBD",
-                    "sort_time": sort_t,
-                    "away": visitor.strip(),
-                    "home": home.strip(),
-                    "division": div.strip(),
-                    "rink": rink,
-                    "published_venue": loc,
-                    "site": label,
-                    "source_url": f"https://gamesheetstats.com/seasons/{sid}/games",
-                })
-        except ScheduleResearchError:
-            raise
-        except Exception as exc:
-            raise ScheduleResearchError(
-                f"GameSheet season {sid} on {day_iso} failed ({type(exc).__name__}); refresh aborted."
-            ) from exc
-        return found
-
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = [pool.submit(_fetch_one, t) for t in tasks]
-        for fut in as_completed(futures):
-            games.extend(fut.result())
+            games.extend(parse_gamesheet_payload(payload, sid, labels[sid], season_days[sid], fallback_day=start if start == end else None))
+        except (ValueError, TypeError) as exc:
+            failures.append(f"season {sid} ({labels[sid]}): {exc}")
+    if failures and len(failures) * 2 >= len(tasks):
+        hint = "" if public_python else " (Cloudflare challenge; install Playwright for OPPORTUNITIES_PUBLIC_PYTHON)"
+        raise ScheduleResearchError(f"GameSheet: {len(failures)}/{len(tasks)} seasons failed{hint}, e.g. {failures[0]}")
+    if failures and warnings is not None:
+        warnings.append(f"GameSheet: {len(failures)}/{len(tasks)} seasons failed: " + "; ".join(failures[:5]))
     return games
 
 
@@ -1082,21 +1283,35 @@ def run_muse_spark_agent_for_day(day_iso: str, rinks: list[str]) -> list[dict]:
 def rink_coverage_warnings(rinks: list[str]) -> list[str]:
     warnings = []
     for rink in sorted(set(rinks)):
-        region = RINK_REGION.get(rink)
+        region = rink_region(rink)
         if region == "ROLLER":
             warnings.append(f"{rink}: not covered by the five ice-hockey sources; separate roller-hockey research is required.")
         elif not region:
-            warnings.append(f"{rink}: unmapped facility; game coverage is incomplete.")
+            warnings.append(f"{rink}: unrecognized facility address (no rink name/state); game coverage is incomplete.")
+        elif rink in _DYNAMIC_RINKS:
+            warnings.append(f"{rink}: matched to league venues by facility name only; add an alias in canonical_rink if a league spells it differently.")
     return warnings
 
 
-def build_game_opportunities_report(target_date: str | None = None, use_muse: bool = False, public_python: str | None = None, use_luna: bool = False, progress=None) -> dict:
-    if use_muse and use_luna:
-        raise ScheduleResearchError("Select one AI research provider, not both Muse and Luna.")
+def build_game_opportunities_report(
+    target_date: str | None = None,
+    use_muse: bool = False,
+    public_python: str | None = None,
+    use_luna: bool = False,
+    progress=None,
+    use_vibe: bool = False,
+    strict: bool = False,
+    horizon_days: int | None = None,
+) -> dict:
+    if sum(bool(x) for x in (use_muse, use_luna, use_vibe)) > 1:
+        raise ScheduleResearchError("Select one AI research provider (Vibe, Luna, or Muse).")
     _enable_ipv4_fastpath()
     token, domain = get_pipedrive_credentials()
+    _DYNAMIC_RINKS.clear()
     tz = ZoneInfo("America/New_York")
-    today_iso = datetime.now(tz).date().isoformat()
+    today = datetime.now(tz).date()
+    today_iso = today.isoformat()
+    horizon_end_iso = (today + timedelta(days=horizon_days)).isoformat() if horizon_days else None
 
     # 1. Fetch all Pipedrive data (entire CRM + undone shoot_booking activities)
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1152,13 +1367,15 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
 
         if local_date < today_iso:
             continue
+        if horizon_end_iso and local_date > horizon_end_iso:
+            continue
         if target_date and local_date != target_date:
             continue
 
         loc = a.get("location") or ""
         if isinstance(loc, dict):
             loc = loc.get("value") or loc.get("formatted_address") or ""
-        rink = canonical_rink(loc)
+        rink = canonical_rink(loc) or register_shoot_facility(loc)
         did = str(a.get("deal_id") or "")
         pid = str(a.get("person_id") or "")
         client_name = a.get("person_name") or a.get("deal_title") or ""
@@ -1268,48 +1485,108 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
             "ages": extract_ages(full_text),
         })
 
-    # 4. Query all 5 schedule sites across our shoot days
+    # 4. Query all 5 schedule sites across our shoot days. Each source is
+    # isolated: one site going down (or changing its markup) must not wipe out
+    # every other site's results. Failures are recorded and shown on the page so
+    # a failed source is never mistaken for "no games".
     all_raw_games: list[dict] = []
-    all_raw_games.extend(fetch_ayhl_games(shoots_by_day))
-    all_raw_games.extend(fetch_ahf_thf_games(shoots_by_day))
-    all_raw_games.extend(fetch_gamesheet_and_fedhockey_games(shoots_by_day, public_python=public_python))
-    all_raw_games.extend(fetch_hollydell_facility_games(shoots_by_day))
+    source_status: list[dict] = []
+    source_warnings: list[str] = []
+    public_python = find_public_python(public_python)
+    if progress:
+        progress(
+            f"Pipedrive: {len(shoots_by_day)} shoot days, {sum(len(v) for v in shoots_by_day.values())} upcoming shoots. "
+            f"GameSheet runtime: {'headless browser via ' + public_python if public_python else 'plain HTTP (no Playwright found)'}"
+        )
+    collectors = [
+        ("AYHL", lambda: fetch_ayhl_games(shoots_by_day)),
+        ("AHF / THF", lambda: fetch_ahf_thf_games(shoots_by_day)),
+        ("GameSheet / FedHockey", lambda: fetch_gamesheet_and_fedhockey_games(shoots_by_day, public_python=public_python, warnings=source_warnings)),
+        ("Hollydell Rink Calendar", lambda: fetch_hollydell_facility_games(shoots_by_day)),
+    ]
+    for name, collect in collectors:
+        started = time.monotonic()
+        try:
+            found = collect() if shoots_by_day else []
+            all_raw_games.extend(found)
+            source_status.append({"source": name, "status": "ok", "games": len(found), "error": ""})
+            if progress:
+                progress(f"{name}: {len(found)} games at mapped rinks on shoot days ({time.monotonic() - started:.0f}s)")
+        except Exception as exc:  # noqa: BLE001 - recorded, surfaced, and enforced below
+            logger.exception("Schedule source %s failed", name)
+            err = str(exc) if isinstance(exc, ScheduleResearchError) else f"{type(exc).__name__}: {_short_error(exc)}"
+            source_status.append({"source": name, "status": "failed", "games": 0, "error": err})
+            if progress:
+                progress(f"{name}: FAILED — {err}")
+    failed_sources = [s for s in source_status if s["status"] == "failed"]
+    if shoots_by_day and len(failed_sources) == len(collectors):
+        raise ScheduleResearchError("Every schedule source failed (network down?); refresh aborted.")
+    if strict and failed_sources:
+        raise ScheduleResearchError(
+            "Strict mode: " + "; ".join(f"{s['source']}: {s['error']}" for s in failed_sources)
+        )
 
-    ai_day_results = {}
-    if use_luna:
-        from .luna_research import run_luna_research_for_day
+    # 4b. Optional AI web-research pass, one isolated agent session per shoot
+    # day. Only public rink/game data is sent; never CRM data. A failed day is
+    # a coverage note, not a reason to throw away the deterministic results.
+    ai_day_results: dict[str, dict] = {}
+    ai_errors: list[str] = []
+    ai_label = ""
+    run_ai_day = None
+    if use_vibe:
+        from .vibe_research import run_vibe_research_for_day as run_ai_day
+        ai_label = "Mistral Vibe"
+    elif use_luna:
+        from .luna_research import run_luna_research_for_day as run_ai_day
+        ai_label = "Luna/Codex"
+    elif use_muse:
+        def run_ai_day(day_iso, rinks, known):
+            return {"games": run_muse_spark_agent_for_day(day_iso, rinks), "limitations": []}
+        ai_label = "Muse Spark"
 
+    if run_ai_day and shoots_by_day:
+        workers = max(1, int(os.environ.get("OPPORTUNITIES_AI_CONCURRENCY", "3")))
         if progress:
-            progress(f"Public schedules retrieved. Starting Luna/Codex browser research for {len(shoots_by_day)} shoot days...")
-        with ThreadPoolExecutor(max_workers=3) as pool:
+            progress(f"Public schedules retrieved. Starting {ai_label} web research for {len(shoots_by_day)} shoot days ({workers} at a time)...")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
             for day_iso, shoots in sorted(shoots_by_day.items()):
-                rinks = sorted({s["rink"] for s in shoots if s.get("rink")})
+                rinks = sorted({s["rink"] for s in shoots if rink_region(s.get("rink") or "") not in (None, "ROLLER")})
+                if not rinks:
+                    continue
                 known = [g for g in all_raw_games if g["date"] == day_iso and g["rink"] in rinks]
-                futures[pool.submit(run_luna_research_for_day, day_iso, rinks, known)] = day_iso
+                futures[pool.submit(run_ai_day, day_iso, rinks, known)] = day_iso
             for future in as_completed(futures):
                 day_iso = futures[future]
-                result = future.result()
-                ai_day_results[day_iso] = result
-                for game in result["games"]:
-                    try:
-                        game["sort_time"] = datetime.strptime(game["time"].upper(), "%I:%M %p").strftime("%H:%M")
-                    except ValueError:
-                        raise ScheduleResearchError(f"Luna returned an invalid game time on {day_iso}; refresh aborted.")
-                    game["discovery"] = "Luna/Codex"
+                try:
+                    result = future.result()
+                except Exception as exc:  # noqa: BLE001 - per-day isolation
+                    logger.warning("%s research failed on %s: %s", ai_label, day_iso, exc)
+                    msg = str(exc) if isinstance(exc, ScheduleResearchError) else f"{type(exc).__name__}: {_short_error(exc)}"
+                    ai_errors.append(f"{ai_label} {day_iso}: {msg}")
+                    ai_day_results[day_iso] = {"games": [], "limitations": [f"{ai_label} web research did not complete for this day: {msg}"], "failed": True}
+                    if progress:
+                        progress(f"{ai_label} {day_iso}: FAILED — {msg}")
+                    continue
+                added = 0
+                for game in result.get("games") or []:
+                    rk = canonical_rink(game.get("rink") or "") or canonical_rink(game.get("published_venue") or "") or game.get("rink")
+                    if not rk:
+                        continue
+                    game["rink"] = rk
+                    if not game.get("sort_time"):
+                        try:
+                            game["sort_time"] = datetime.strptime(str(game.get("time", "")).upper(), "%I:%M %p").strftime("%H:%M")
+                        except ValueError:
+                            game["sort_time"] = "99:99"
+                    game.setdefault("discovery", ai_label)
+                    game.setdefault("division", "")
+                    game.setdefault("site", ai_label)
                     all_raw_games.append(game)
+                    added += 1
+                ai_day_results[day_iso] = result
                 if progress:
-                    progress(f"Luna checked {day_iso}: {len(result['games'])} additional game candidates, {len(result['limitations'])} coverage notes ({len(ai_day_results)}/{len(shoots_by_day)} days).")
-
-    if use_muse:
-        for day_iso, shoots in sorted(shoots_by_day.items()):
-            day_rinks = sorted({s["rink"] for s in shoots if s.get("rink")})
-            for mg in run_muse_spark_agent_for_day(day_iso, day_rinks):
-                rk = canonical_rink(mg.get("rink") or mg.get("published_venue") or "")
-                if rk:
-                    mg["rink"] = rk
-                    mg.setdefault("sort_time", "99:99")
-                    all_raw_games.append(mg)
+                    progress(f"{ai_label} {day_iso}: {added} candidate games, {len(result.get('limitations') or [])} notes ({len(ai_day_results)}/{len(futures)} days).")
 
     # 5. Assemble day-by-day report: shoots -> games at same rinks -> teams -> CRM matches (direct + maybe)
     days_output: list[dict] = []
@@ -1489,7 +1766,11 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
             "date_label": dt_label,
             "shoots": day_shoots,
             "rinks": sorted(day_rinks),
-            "coverage_warnings": rink_coverage_warnings(list(day_rinks)) + ai_day_results.get(day_iso, {}).get("limitations", []),
+            "coverage_warnings": (
+                [f"{s['source']} unavailable this refresh — games from it are missing: {s['error']}" for s in failed_sources]
+                + rink_coverage_warnings(list(day_rinks))
+                + ai_day_results.get(day_iso, {}).get("limitations", [])
+            ),
             "games": day_games,
             "teams": sorted(teams_map.values(), key=lambda t: (-t["direct_matches_count"], -t["maybe_matches_count"], t["name"].lower())),
             "direct_matches": direct_matches,
@@ -1500,11 +1781,19 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
         "generated_at": datetime.now(tz).strftime("%Y-%m-%d %-I:%M %p %Z"),
         "generated_iso": datetime.now(timezone.utc).isoformat(),
         "sites": TARGET_SITES,
+        "source_status": source_status,
+        "source_warnings": source_warnings + ai_errors,
+        "complete": not failed_sources,  # schedule sources; AI day failures are listed in source_warnings
         "coverage": {
-            "muse_completed": use_muse,
-            "ai_completed": use_muse or use_luna,
-            "ai_model": "openai/gpt-6-luna (Codex)" if use_luna else "Muse Spark" if use_muse else "none",
-            "ai_days_checked": len(ai_day_results) if use_luna else len(shoots_by_day) if use_muse else 0,
+            "muse_completed": use_muse and not ai_errors,
+            "ai_completed": bool(run_ai_day) and bool(ai_day_results) and not ai_errors,
+            "ai_model": (
+                f"Mistral Vibe CLI ({os.environ.get('VIBE_RESEARCH_MODEL') or 'default model'})" if use_vibe
+                else "openai/gpt-6-luna (Codex)" if use_luna else "Muse Spark" if use_muse else "none"
+            ),
+            "ai_days_checked": sum(1 for r in ai_day_results.values() if not r.get("failed")),
+            "ai_days_failed": sum(1 for r in ai_day_results.values() if r.get("failed")),
+            "ai_games_added": sum(1 for g in all_raw_games if g.get("discovery")),
             "scope": "Configured public league seasons and mapped facilities; not a guarantee of exhaustive coverage.",
             "crm_scope": "One prioritized deal/lead per person plus standalone persons with notes; archived leads and all custom fields are not indexed.",
         },
@@ -1520,6 +1809,27 @@ def build_game_opportunities_report(target_date: str | None = None, use_muse: bo
         "days": days_output,
     }
     return report
+
+
+def _match_key(day_iso: str, m: dict) -> tuple:
+    return (day_iso, m.get("crm_kind"), str(m.get("crm_id")), m.get("club"))
+
+
+def mark_new_matches(report: dict, previous: dict | None) -> int:
+    """Flag matches absent from the previous snapshot (`is_new`) and count them."""
+    prev_keys = {
+        _match_key(d.get("date"), m)
+        for d in (previous or {}).get("days") or []
+        for m in (d.get("direct_matches") or []) + (d.get("maybe_matches") or [])
+    }
+    new = 0
+    for d in report.get("days") or []:
+        for m in (d.get("direct_matches") or []) + (d.get("maybe_matches") or []):
+            m["is_new"] = _match_key(d.get("date"), m) not in prev_keys
+            new += m["is_new"]
+    report.setdefault("summary", {})["new_matches"] = new
+    report["previous_generated_at"] = (previous or {}).get("generated_at") or ""
+    return new
 
 
 def save_report_locally(report: dict) -> Path:
