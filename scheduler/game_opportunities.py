@@ -167,6 +167,7 @@ RINK_REGION = {
     "Rockland Skating Rink": "NE",
     "Hobomock Arena": "NE",
     "Great American Center (roller hockey)": "ROLLER",
+    "The Bog": "NE",
     "Brewster Ice Arena": "NY",
     "Northwell Health Ice Center": "NY",
     "Rochester Ice Center (Fairport)": "NY",
@@ -267,16 +268,59 @@ def rink_region(rink: str) -> str | None:
     return RINK_REGION.get(rink) or (_DYNAMIC_RINKS.get(rink) or {}).get("region")
 
 
+# League venue names on shoot days that matched no rink; reset per refresh.
+_UNMAPPED_VENUES: dict[str, int] = {}
+
+_HINT_STOP_WORDS = {
+    "ice", "rink", "rinks", "arena", "arenas", "center", "sports", "complex", "the", "of", "at", "and",
+    "skating", "club", "hockey", "house", "sheet", "main", "east", "west", "north", "south", "new",
+    "jersey", "york", "island", "long", "park", "community", "memorial", "county", "university",
+    "college", "high", "school", "academy", "field", "garden", "gardens", "inc", "llc", "tbd", "usa",
+    "red", "blue", "gold", "green", "white", "black", "bank", "american", "national", "olympic", "pond",
+}
+
+
 def canonical_rink(raw_loc: str, league_context: str = "") -> str | None:
     """Map Pipedrive shoot addresses and league venue strings to a canonical facility."""
     found = _static_canonical_rink(raw_loc, league_context)
-    if found or not _DYNAMIC_RINKS:
-        return found
-    norm = f" {_norm_venue(raw_loc)} "
-    for name, info in _DYNAMIC_RINKS.items():
-        if any(f" {alias} " in norm for alias in info["aliases"]):
-            return name
-    return None
+    if not found and _DYNAMIC_RINKS:
+        norm = f" {_norm_venue(raw_loc)} "
+        found = next(
+            (name for name, info in _DYNAMIC_RINKS.items() if any(f" {a} " in norm for a in info["aliases"])),
+            None,
+        )
+    if not found and league_context and raw_loc:
+        key = " ".join(raw_loc.split())[:120]
+        _UNMAPPED_VENUES[key] = _UNMAPPED_VENUES.get(key, 0) + 1
+    return found
+
+
+# Reviewed venues that only *look* like one of our rinks. Lowercase substrings.
+NOT_OUR_RINKS = (
+    "biggby ice cube",  # Chelsea, Michigan - not Chelsea Piers
+)
+
+
+def unmapped_venue_hints(shoot_rinks: set[str], limit: int = 10) -> list[str]:
+    """Unrecognized venue names that share a distinctive word with one of our shoot rinks.
+
+    These are where games silently go missing (e.g. EHF lists "The Bog" as
+    just "Bog 2"). Surfacing them turns a silent hole into a visible warning.
+    """
+    def toks(text: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z0-9]+", text.lower().replace("centre", "center"))
+                if len(w) >= 3 and w not in _HINT_STOP_WORDS and not w.isdigit()}
+    rink_toks = {rk: toks(rk) for rk in shoot_rinks}
+    hints = []
+    for venue, n in sorted(_UNMAPPED_VENUES.items(), key=lambda kv: -kv[1]):
+        if any(x in venue.lower() for x in NOT_OUR_RINKS):
+            continue
+        near = sorted(rk for rk, t in rink_toks.items() if t & toks(venue))
+        if near:
+            hints.append(f"Unrecognized venue \"{venue}\" ({n} game{'s' if n != 1 else ''} on shoot days) resembles {', '.join(near)} — if it is the same rink, add an alias in canonical_rink.")
+        if len(hints) >= limit:
+            break
+    return hints
 
 
 def _static_canonical_rink(raw_loc: str, league_context: str = "") -> str | None:
@@ -424,8 +468,11 @@ def _static_canonical_rink(raw_loc: str, league_context: str = "") -> str | None
         return "Stamford Twin Rinks"
     if "chelsea piers connecticut" in s or "chelsea piers ct" in s:
         return "Chelsea Piers CT"
-    if "chelsea piers sky rink" in s:
+    if "chelsea piers sky rink" in s or ("sky rink" in s and "chelsea" in s):
         return "Chelsea Piers Sky Rink"
+    # The Bog, Kingston MA. EHF/GameSheet lists its sheets as just "Bog 1"/"Bog 2".
+    if re.match(r"(?:the\s+)?bog\b(?:\s*(?:rink\s*)?#?\d)?(?:\s*[,(-]|$)", s) or "kingston bog" in s:
+        return "The Bog"
     if "danbury ice" in s:
         return "Danbury Ice Arena"
     if "sport-o-rama" in s:
@@ -1308,6 +1355,7 @@ def build_game_opportunities_report(
     _enable_ipv4_fastpath()
     token, domain = get_pipedrive_credentials()
     _DYNAMIC_RINKS.clear()
+    _UNMAPPED_VENUES.clear()
     tz = ZoneInfo("America/New_York")
     today = datetime.now(tz).date()
     today_iso = today.isoformat()
@@ -1518,6 +1566,12 @@ def build_game_opportunities_report(
             source_status.append({"source": name, "status": "failed", "games": 0, "error": err})
             if progress:
                 progress(f"{name}: FAILED — {err}")
+    shoot_rink_names = {s["rink"] for v in shoots_by_day.values() for s in v if s.get("rink")}
+    venue_hints = unmapped_venue_hints(shoot_rink_names)
+    source_warnings.extend(venue_hints)
+    if progress:
+        for hint in venue_hints:
+            progress("Venue check: " + hint)
     failed_sources = [s for s in source_status if s["status"] == "failed"]
     if shoots_by_day and len(failed_sources) == len(collectors):
         raise ScheduleResearchError("Every schedule source failed (network down?); refresh aborted.")

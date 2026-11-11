@@ -116,3 +116,33 @@ class VibeResumeTests(TestCase):
         self.assertEqual(len(result["games"]), 1)
         self.assertIn("--resume", calls[1])
         self.assertEqual(calls[1][calls[1].index("--agent") + 1], "rink-research")
+
+
+class VibeBrowserProfileTests(TestCase):
+    def test_browser_profile_blocks_code_execution_and_local_tools(self):
+        with patch("scheduler.vibe_research._browser_executable", return_value="/fake/chrome"):
+            profile = vibe.build_agent_profile(True)
+        for tool in ("browser_evaluate", "browser_run_code_unsafe", "browser_file_upload", "browser_fill_form", "browser_type"):
+            self.assertIn(f'"{tool}"', profile)
+        for tool in ("bash", "read_file", "write_file"):
+            self.assertIn(f'"{tool}"', profile)
+        self.assertIn("--isolated", profile)
+        self.assertNotIn('"browser_navigate"', profile.split("disabled_tools =")[-1])
+
+    def test_browser_refused_when_user_config_has_other_mcp_servers(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            Path(home, "config.toml").write_text('[[mcp_servers]]\nname = "x"\ntransport = "stdio"\ncommand = "x"\n')
+            with patch.dict(os.environ, {"VIBE_HOME": home}):
+                self.assertFalse(vibe.browser_available())
+
+    def test_browser_navigation_counts_as_an_opened_source(self):
+        entries = [
+            {"type": "effect", "generationStatus": "completed",
+             "detail": {"toolName": "mcp_rinkbrowser.browser_navigate", "input": {"url": "https://rink.example.com/calendar"}}},
+            {"type": "effect", "generationStatus": "completed",
+             "detail": {"toolName": "mcp_rinkbrowser.browser_snapshot", "input": {}}},
+        ]
+        _text, hosts, calls = vibe.parse_transcript(entries)
+        self.assertEqual(calls, 2)
+        self.assertEqual(hosts, {"rink.example.com"})

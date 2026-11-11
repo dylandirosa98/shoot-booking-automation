@@ -132,6 +132,27 @@ class ScheduleRefreshTests(unittest.TestCase):
         finally:
             research._DYNAMIC_RINKS.clear()
 
+    def test_bog_and_sky_rink_league_spellings(self):
+        for venue in ("Bog 1", "Bog 2", "The Bog Rink #2"):
+            self.assertEqual(research.canonical_rink(venue, "ehf"), "The Bog")
+        self.assertEqual(research.canonical_rink("The Bog, Summer Street, Kingston, MA, USA"), "The Bog")
+        self.assertIsNone(research.canonical_rink("Boghosian Arena", "x"))
+        self.assertEqual(research.canonical_rink("Sky Rink @ Chelsea Piers", "liahl"), "Chelsea Piers Sky Rink")
+
+    def test_unrecognized_venue_resembling_a_shoot_rink_is_surfaced(self):
+        research._UNMAPPED_VENUES.clear()
+        try:
+            research.canonical_rink("Revolution Pittston Sheet 2", "league")  # unknown spelling
+            research.canonical_rink("Revolution Pittston Sheet 2", "league")
+            research.canonical_rink("Some Rink In Ohio", "league")
+            research.canonical_rink("Unknown Address Only")  # shoot lookups (no league) are not recorded
+            hints = research.unmapped_venue_hints({"Revolution Ice Centre"})
+            self.assertEqual(len(hints), 1)
+            self.assertIn("Revolution Pittston Sheet 2", hints[0])
+            self.assertIn("2 games", hints[0])
+        finally:
+            research._UNMAPPED_VENUES.clear()
+
     def test_ages_glued_to_words_and_phone_numbers(self):
         self.assertEqual(research.extract_ages("Home Rink2016 Boston junior terriers"), {"10u"})
         self.assertEqual(research.extract_ages("call 555-201-2014"), set())
