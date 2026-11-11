@@ -594,15 +594,13 @@ def manual_send_to_videographer(shoot: Shoot, videographer: Videographer) -> Inv
             )
             invites.append(selected)
 
-        completed_before = [
-            invite for invite in invites
-            if invite.id != selected.id and invite.status in {"declined", "expired", "accepted", "cancelled"}
-        ]
+        # Each invite goes in exactly one bucket. A cancelled invite that was
+        # actually sent (has a Calendar event) is history; an unsent cancelled
+        # entry is still part of the queue.
+        others = [invite for invite in invites if invite.id != selected.id]
+        queued_after = [invite for invite in others if _is_queued_entry(invite)]
+        completed_before = [invite for invite in others if not _is_queued_entry(invite)]
         active_position = len(completed_before)
-        queued_after = [
-            invite for invite in invites
-            if invite.id != selected.id and invite.status in {"pending", "cancelled"}
-        ]
         ordered = completed_before + [selected] + queued_after
         for rank, invite in enumerate(ordered):
             if invite.rank != rank:
@@ -723,11 +721,21 @@ def _next_available_invite(shoot: Shoot, after_rank: int) -> Invite | None:
     Looks only at the remaining pending manual-queue entries. Previously sent
     invites are never re-offered automatically.
     """
-    # First: try the next rank in the chain
-    n = shoot.invites.filter(rank__gt=after_rank).order_by("rank").first()
-    if n and n.status in {"pending", "cancelled"}:
-        return n
+    # The next unsent queue entry after this rank. Someone who was sent the
+    # shoot and then replaced (cancelled with a Calendar event) is skipped.
+    for n in shoot.invites.filter(rank__gt=after_rank).order_by("rank"):
+        if _is_queued_entry(n):
+            return n
+        if n.status != "cancelled":
+            return None  # preserve: a declined/expired/accepted entry ends the chain
     return None
+
+
+def _is_queued_entry(invite: Invite) -> bool:
+    """A queue entry: pending, or cancelled before it was ever sent (no Calendar event)."""
+    if invite.status == "pending":
+        return True
+    return invite.status == "cancelled" and not invite.google_event_id
 
 
 def _mark_accepted(invite: Invite) -> None:

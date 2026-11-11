@@ -329,7 +329,7 @@ class VideographerEscalationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Manual Send")
-        self.assertContains(response, "Queued Order")
+        self.assertContains(response, "Optional Manual Queue")
 
     def test_manual_send_moves_selected_invite_next_and_reuses_event(self):
         shoot, first_invite, second_invite = self._shoot_with_invites()
@@ -397,7 +397,7 @@ class VideographerEscalationTests(TestCase):
                 self.replacements = []
 
             def replace_event_attendee(self, *, event_id, description, attendee_email):
-                self.replacements.append((event_id, attendee_email, "Third" in description))
+                self.replacements.append((event_id, attendee_email, "Arrive 15-20 minutes" in description))
                 return event_id
 
         fake_calendar = FakeCalendar()
@@ -431,7 +431,7 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(
             list(shoot.invites.order_by("rank").values_list("videographer__email", "status", "google_event_id")),
             [
-                ("first@example.com", "declined", "event-123"),
+                ("first@example.com", "cancelled", "event-123"),
                 ("third@example.com", "pending", "event-123"),
                 ("second@example.com", "pending", ""),
                 ("fourth@example.com", "pending", ""),
@@ -495,7 +495,7 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(
             list(shoot.invites.order_by("rank").values_list("videographer__email", "status")),
             [
-                ("first@example.com", "declined"),
+                ("first@example.com", "cancelled"),
                 ("third@example.com", "declined"),
                 ("second@example.com", "pending"),
                 ("fourth@example.com", "pending"),
@@ -506,6 +506,43 @@ class VideographerEscalationTests(TestCase):
             fake_calendar.replacements,
             [("event-123", "third@example.com"), ("event-123", "second@example.com")],
         )
+
+    def test_decline_after_manual_send_skips_the_person_who_was_replaced(self):
+        # Regression: the replaced invitee was ranked twice and, being
+        # "cancelled", was treated as next in the queue, so a decline sent the
+        # shoot back to the person who had just been taken off it.
+        shoot, first_invite, second_invite = self._shoot_with_invites()
+        third = Videographer.objects.create(
+            name="Third Video", email="third@example.com", state="MI", rating=4.6, active=True,
+        )
+        Invite.objects.create(
+            shoot=shoot, videographer=third, rank=2, score=8,
+            drive_miles=7, drive_minutes=14, status="pending", expires_at=timezone.now(),
+        )
+
+        class FakeCalendar:
+            moved_to = []
+
+            def replace_event_attendee(self, *, event_id, description, attendee_email):
+                self.moved_to.append(attendee_email)
+                return event_id
+
+            def get_attendee_status(self, event_id, attendee_email):
+                return "declined" if attendee_email == "third@example.com" else "needsAction"
+
+        cal = FakeCalendar()
+        with patch("scheduler.orchestrator.get_client", return_value=cal):
+            with patch("scheduler.jobs.schedule_escalation_check"):
+                Client().post(f"/shoots/{shoot.id}/manual-send/", data={"videographer_id": str(third.id), "action": "send"})
+                self.assertEqual(
+                    list(shoot.invites.order_by("rank").values_list("rank", "videographer__email")),
+                    [(0, "first@example.com"), (1, "third@example.com"), (2, "second@example.com")],
+                )
+                poll_all_pending_invites()
+
+        self.assertEqual(cal.moved_to, ["third@example.com", "second@example.com"])
+        first_invite.refresh_from_db()
+        self.assertEqual(first_invite.status, "cancelled")
 
     def test_reorder_invites_changes_only_unsent_queue(self):
         shoot, first_invite, second_invite = self._shoot_with_invites()
@@ -770,7 +807,8 @@ class VideographerEscalationTests(TestCase):
         self.assertEqual(first_invite.status, "pending")
         self.assertIsNone(first_invite.responded_at)
         self.assertEqual(first_invite.google_event_id, "event-456")
-        self.assertEqual(second_invite.status, "declined")
+        # Replaced by a manual send (not a decline by them) since ced9b8c.
+        self.assertEqual(second_invite.status, "cancelled")
         self.assertEqual(fake_calendar.replacement, ("event-456", "first@example.com"))
 
     def test_structured_individual_notes_include_only_filled_fields(self):
