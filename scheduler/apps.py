@@ -12,9 +12,10 @@ class SchedulerConfig(AppConfig):
         from . import signals  # noqa: F401
 
         # Don't start the scheduler during migrations, makemigrations, tests, shell, etc.
-        skip_commands = {"migrate", "makemigrations", "collectstatic", "shell",
+        skip_commands = {"migrate", "makemigrations", "collectstatic", "shell", "check",
                          "seed_videographers", "score_demo", "test", "createsuperuser",
-                         "simulate_pipedrive", "simulate_facebook_lead", "research_game_opportunities"}
+                         "simulate_pipedrive", "simulate_facebook_lead", "research_game_opportunities",
+                         "run_shoot_reminders"}
         if any(cmd in sys.argv for cmd in skip_commands):
             return
         # Avoid double-start under the autoreloader (only relevant if --noreload not set)

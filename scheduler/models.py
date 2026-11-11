@@ -328,3 +328,37 @@ class GameOpportunitySnapshot(models.Model):
     def __str__(self):
         timestamp = self.generated_at or (self.updated_at.strftime("%Y-%m-%d %H:%M") if self.updated_at else "unsaved")
         return f"Game Opportunity Snapshot ({timestamp})"
+
+
+class ShootReminder(models.Model):
+    """Durable milestone ledger. Terminal delivery states must never be rearmed.
+
+    Scalar source identifiers intentionally survive source deletion. One row per
+    shoot/recipient/milestone means moving a shoot cannot resend a sent milestone.
+    Phone and rendered body are deliberately not persisted here.
+    """
+    shoot = models.ForeignKey(Shoot, null=True, on_delete=models.SET_NULL,
+                              related_name="sms_reminders")
+    source_shoot_id = models.PositiveBigIntegerField()
+    source_activity_id = models.CharField(max_length=50, blank=True)
+    recipient_id = models.PositiveBigIntegerField()
+    offset_hours = models.PositiveSmallIntegerField()
+    shoot_datetime = models.DateTimeField()
+    due_at = models.DateTimeField(db_index=True)
+    schedule_version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, default="pending", db_index=True,
+        choices=[(s, s) for s in ("pending", "sending", "sent", "cancelled", "skipped", "manual_review")])
+    reason = models.CharField(max_length=50, blank=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    provider_guid = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["source_shoot_id", "recipient_id", "offset_hours"],
+                                    name="unique_shoot_recipient_milestone"),
+            models.CheckConstraint(condition=models.Q(offset_hours__in=[48, 24, 3]),
+                                   name="valid_shoot_reminder_offset"),
+        ]

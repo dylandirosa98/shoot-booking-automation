@@ -588,6 +588,24 @@ def pipedrive_webhook(request):
     except Exception:
         return HttpResponseBadRequest("Invalid JSON")
 
+    if getattr(settings, "SHOOT_REMINDERS_ENABLED", False):
+        from .reminder_integration import canonical_activity_payload, apply_activity_to_shoot
+        try:
+            payload = canonical_activity_payload(payload)
+        except ValueError:
+            return HttpResponseBadRequest("Exact activity ID required")
+        except Exception:
+            # Ask Pipedrive to retry; never trust stale payloads during an outage.
+            return JsonResponse({"status": "retry", "reason": "CRM verification unavailable"}, status=503)
+        activity = payload["data"]
+        existing = Shoot.objects.filter(pipedrive_activity_id=str(activity["id"])).first()
+        if existing:
+            from .reminder_integration import _activity_fields
+            # Existing workflow handles valid updates (and its notifications).
+            # Explicitly suppress reminders for deleted/completed/invalid shoots.
+            if payload["meta"]["action"] == "delete" or _activity_fields(activity) is None:
+                apply_activity_to_shoot(existing, None)
+
     action = _detect_action(payload)
     logger.info("Pipedrive webhook: action=%r", action)
 
