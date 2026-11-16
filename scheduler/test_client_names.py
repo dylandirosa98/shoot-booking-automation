@@ -88,3 +88,22 @@ class ClientNameBackfillTests(TestCase):
         self.assertEqual(Shoot.objects.get(pipedrive_activity_id="1").client_name, "Upcoming Client")
         self.assertEqual(Shoot.objects.get(pipedrive_activity_id="2").client_name, "")
         self.assertEqual(Shoot.objects.get(pipedrive_activity_id="3").client_name, "Already Set")
+
+
+class ClientNameSyncEndpointTests(TestCase):
+    URL = "/api/shoots/client-names/sync/"
+
+    def _post(self, body, secret="sync-secret"):
+        with patch.dict("os.environ", {"OPPORTUNITIES_SYNC_SECRET": "sync-secret"}):
+            return self.client.post(self.URL, data=json.dumps(body), content_type="application/json",
+                                    HTTP_X_SYNC_SECRET=secret)
+
+    def test_updates_matching_shoots(self):
+        Shoot.objects.create(pipedrive_activity_id="18120", title="Shoot booking", location="A",
+                             shoot_datetime=timezone.now() + timedelta(days=4))
+        response = self._post({"names": {"18120": "Salvatore Trazzera", "99999": "Nobody"}})
+        self.assertEqual(response.json()["updated"], 1)
+        self.assertEqual(Shoot.objects.get(pipedrive_activity_id="18120").client_name, "Salvatore Trazzera")
+
+    def test_rejects_wrong_secret(self):
+        self.assertEqual(self._post({"names": {}}, secret="nope").status_code, 403)

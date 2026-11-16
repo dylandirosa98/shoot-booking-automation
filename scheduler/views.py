@@ -877,6 +877,39 @@ def sync_game_opportunities(request):
     })
 
 
+@csrf_exempt
+@require_POST
+def sync_client_names(request):
+    """Receive {"names": {pipedrive_activity_id: client_name}} from a machine that
+    can read Pipedrive, and store the names on matching shoots."""
+    import os
+
+    expected_secret = (
+        os.getenv("OPPORTUNITIES_SYNC_SECRET")
+        or settings.PIPEDRIVE_WEBHOOK_SECRET
+    )
+    provided_secret = request.headers.get("X-Sync-Secret", "")
+    if not expected_secret or not hmac.compare_digest(provided_secret, expected_secret):
+        return HttpResponseForbidden("Invalid sync secret")
+    try:
+        payload = json.loads(request.body.decode() or "{}")
+    except Exception:
+        return HttpResponseBadRequest("Invalid JSON")
+    names = payload.get("names") if isinstance(payload, dict) else None
+    if not isinstance(names, dict) or len(names) > 5000:
+        return HttpResponseBadRequest("Expected {'names': {activity_id: name}}")
+
+    updated = 0
+    for activity_id, name in names.items():
+        if not isinstance(name, str) or not name.strip() or not str(activity_id).isdigit():
+            continue
+        updated += (Shoot.objects
+                    .filter(pipedrive_activity_id=str(activity_id))
+                    .exclude(client_name=name.strip()[:255])
+                    .update(client_name=name.strip()[:255]))
+    return JsonResponse({"status": "ok", "received": len(names), "updated": updated})
+
+
 # ---------------------------------------------------------------------------
 # Footage app feed (PuckPro footage platform)
 # ---------------------------------------------------------------------------
