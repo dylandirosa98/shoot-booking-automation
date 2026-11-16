@@ -680,12 +680,17 @@ def pipedrive_webhook(request):
     if parsed.get("duration_minutes"):
         kwargs["duration_minutes"] = parsed["duration_minutes"]
 
+    from .client_names import apply_client_name
+    activity_data = payload.get("data") or payload.get("current") or {}
+
     if action == "create":
         shoot = handle_new_shoot(**kwargs)
+        apply_client_name(shoot, activity_data)
         return JsonResponse({"status": "ok", "action": "created", "shoot_id": shoot.id, "shoot_status": shoot.status})
 
     # action == "change"
     shoot, taken = handle_updated_shoot(**kwargs)
+    apply_client_name(shoot, activity_data)
     return JsonResponse({"status": "ok", "action": taken, "shoot_id": shoot.id, "shoot_status": shoot.status})
 
 
@@ -916,6 +921,7 @@ def footage_feed(request):
                 "id": s.id,
                 "status": s.status,  # pending | confirmed | failed | cancelled
                 "title": s.title,
+                "clientName": s.client_name,
                 "location": s.location,
                 "startsAt": s.shoot_datetime.isoformat(),
                 "durationMinutes": s.duration_minutes,

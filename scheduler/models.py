@@ -171,6 +171,8 @@ class Shoot(models.Model):
     pipedrive_activity_id = models.CharField(max_length=50, unique=True, null=True, blank=True,
         help_text="Pipedrive activity id — the actual unique identifier for one shoot")
     title = models.CharField(max_length=255, blank=True)
+    client_name = models.CharField(max_length=255, blank=True,
+        help_text="Pipedrive contact (person) linked to the shoot activity")
     location = models.CharField(max_length=255)
     lat = models.FloatField(null=True, blank=True)
     lng = models.FloatField(null=True, blank=True)

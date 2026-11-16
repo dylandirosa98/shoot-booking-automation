@@ -24,6 +24,7 @@
     <div class="flex justify-between items-start mb-4">
         <div>
             <h1 class="text-2xl font-bold mb-1">{{ shoot.title|default:"Untitled Shoot" }}</h1>
+            {% if shoot.client_name %}<div class="text-slate-700 text-sm font-medium">Client: {{ shoot.client_name }}</div>{% endif %}
             <div class="text-slate-500 text-sm">Pipedrive deal: <span class="font-mono">{{ shoot.pipedrive_deal_id|default:"—" }}</span></div>
         </div>
         <div>

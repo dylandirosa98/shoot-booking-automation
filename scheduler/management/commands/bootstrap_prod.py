@@ -33,6 +33,12 @@ class Command(BaseCommand):
             self.stdout.write(f"Videographers already exist ({Videographer.objects.count()}), "
                               "skipping seed (admin edits are preserved).")
 
+        # Fill in client names on upcoming shoots booked before that field existed.
+        try:
+            call_command("backfill_client_names")
+        except Exception as exc:  # noqa: BLE001 — never block a deploy on this
+            self.stdout.write(f"Client name backfill skipped: {type(exc).__name__}")
+
         # 2. Ensure superuser exists
         username = os.getenv("BOOTSTRAP_ADMIN_USERNAME", "info@puckpromedia.com")
         email    = os.getenv("BOOTSTRAP_ADMIN_EMAIL",    "info@puckpromedia.com")
