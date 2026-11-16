@@ -65,9 +65,9 @@
             </thead>
             <tbody class="divide-y divide-slate-100">
                 {% for shoot in shoots %}
-                <tr class="hover:bg-slate-50 cursor-pointer align-top" onclick="if(!event.target.closest('details')) window.location='{% url 'shoot_detail' shoot.id %}'">
+                <tr class="hover:bg-slate-50 cursor-pointer align-top" onclick="if(!event.target.closest('details, [data-no-row-nav]')) window.location='{% url 'shoot_detail' shoot.id %}'">
                     <td class="px-6 py-3 font-medium">{{ shoot.title|default:"Untitled" }}</td>
-                    <td class="px-6 py-3 text-sm font-medium text-slate-800">{{ shoot.client_name|default:"—" }}</td>
+                    <td class="px-6 py-3 text-sm" data-no-row-nav>{% include "_client_name_cell.html" %}</td>
                     <td class="px-6 py-3 text-xs text-slate-500">
                         <div>{{ shoot.created_at|date:"M j, Y" }}</div>
                         <div class="text-slate-400">{{ shoot.created_at|date:"g:i A" }}</div>

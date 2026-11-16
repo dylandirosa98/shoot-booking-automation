@@ -10,6 +10,7 @@ urlpatterns = [
     path("api/footage/shoots/", views.footage_feed, name="footage_feed"),
     path("api/shoots/client-names/sync/", views.sync_client_names, name="sync_client_names"),
     path("shoots/<int:shoot_id>/", views.shoot_detail, name="shoot_detail"),
+    path("shoots/<int:shoot_id>/client-name/", views.edit_client_name, name="edit_client_name"),
     path("shoots/<int:shoot_id>/manual-send/", views.manual_send, name="manual_send"),
     path("shoots/<int:shoot_id>/queue/add/", views.add_queue_invite, name="add_queue_invite"),
     path("shoots/<int:shoot_id>/reorder-invites/", views.reorder_invites, name="reorder_invites"),

@@ -107,3 +107,46 @@ class ClientNameSyncEndpointTests(TestCase):
 
     def test_rejects_wrong_secret(self):
         self.assertEqual(self._post({"names": {}}, secret="nope").status_code, 403)
+
+
+class ClientNameEditTests(TestCase):
+    def setUp(self):
+        self.shoot = Shoot.objects.create(
+            pipedrive_activity_id="18120", title="Shoot booking", client_name="royoommen",
+            location="A", shoot_datetime=timezone.now() + timedelta(days=4),
+        )
+        self.url = f"/shoots/{self.shoot.id}/client-name/"
+
+    def test_edit_is_shown_instead_of_pipedrive_name(self):
+        response = self.client.post(self.url, {"client_name": "  Roy   Oommen "}, HTTP_HX_REQUEST="true")
+        self.shoot.refresh_from_db()
+        self.assertEqual(self.shoot.client_name_override, "Roy Oommen")
+        self.assertEqual(self.shoot.display_client_name, "Roy Oommen")
+        self.assertContains(response, "Roy Oommen")
+        self.assertContains(response, "Pipedrive: royoommen")
+        self.assertContains(self.client.get("/"), "Roy Oommen")
+
+    def test_blank_or_pipedrive_name_reverts_to_default(self):
+        self.shoot.client_name_override = "Roy Oommen"
+        self.shoot.save()
+        self.client.post(self.url, {"client_name": ""})
+        self.shoot.refresh_from_db()
+        self.assertEqual(self.shoot.display_client_name, "royoommen")
+        self.client.post(self.url, {"client_name": "Someone"})
+        self.client.post(self.url, {"client_name": "royoommen"})
+        self.shoot.refresh_from_db()
+        self.assertEqual(self.shoot.client_name_override, "")
+
+    def test_pipedrive_sync_keeps_the_edit(self):
+        self.client.post(self.url, {"client_name": "Roy Oommen"})
+        with patch.dict("os.environ", {"OPPORTUNITIES_SYNC_SECRET": "s"}):
+            self.client.post("/api/shoots/client-names/sync/", data=json.dumps({"names": {"18120": "Roy O."}}),
+                             content_type="application/json", HTTP_X_SYNC_SECRET="s")
+        self.shoot.refresh_from_db()
+        self.assertEqual(self.shoot.client_name, "Roy O.")
+        self.assertEqual(self.shoot.display_client_name, "Roy Oommen")
+
+    def test_requires_csrf_token(self):
+        from django.test import Client
+        response = Client(enforce_csrf_checks=True).post(self.url, {"client_name": "X"})
+        self.assertEqual(response.status_code, 403)

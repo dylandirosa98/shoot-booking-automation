@@ -173,6 +173,8 @@ class Shoot(models.Model):
     title = models.CharField(max_length=255, blank=True)
     client_name = models.CharField(max_length=255, blank=True,
         help_text="Pipedrive contact (person) linked to the shoot activity")
+    client_name_override = models.CharField(max_length=255, blank=True,
+        help_text="Name typed on the dashboard; shown instead of the Pipedrive name. Blank = use Pipedrive.")
     location = models.CharField(max_length=255)
     lat = models.FloatField(null=True, blank=True)
     lng = models.FloatField(null=True, blank=True)
@@ -195,6 +197,10 @@ class Shoot(models.Model):
 
     class Meta:
         ordering = ["-shoot_datetime"]
+
+    @property
+    def display_client_name(self) -> str:
+        return self.client_name_override or self.client_name
 
     def __str__(self):
         return f"{self.title or 'Shoot'} @ {self.location} ({self.shoot_datetime:%Y-%m-%d %H:%M})"

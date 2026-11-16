@@ -255,6 +255,21 @@ def shoot_detail(request, shoot_id):
 
 
 @require_POST
+def edit_client_name(request, shoot_id):
+    """Save a dashboard edit of the client name. Blank (or the Pipedrive name
+    itself) clears the edit so the Pipedrive name shows again."""
+    shoot = get_object_or_404(Shoot, id=shoot_id)
+    value = " ".join((request.POST.get("client_name") or "").split())[:255]
+    override = "" if value == shoot.client_name else value
+    if override != shoot.client_name_override:
+        shoot.client_name_override = override
+        shoot.save(update_fields=["client_name_override", "updated_at"])
+    if request.headers.get("HX-Request"):
+        return render(request, "_client_name_cell.html", {"shoot": shoot})
+    return redirect(request.META.get("HTTP_REFERER") or "dashboard")
+
+
+@require_POST
 def manual_send(request, shoot_id):
     shoot = get_object_or_404(Shoot, id=shoot_id)
     notes = _invite_notes_from_post(request)
@@ -954,7 +969,7 @@ def footage_feed(request):
                 "id": s.id,
                 "status": s.status,  # pending | confirmed | failed | cancelled
                 "title": s.title,
-                "clientName": s.client_name,
+                "clientName": s.display_client_name,
                 "location": s.location,
                 "startsAt": s.shoot_datetime.isoformat(),
                 "durationMinutes": s.duration_minutes,

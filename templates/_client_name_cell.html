@@ -1,0 +1,27 @@
+<div class="client-name-cell">
+    <div class="cn-view flex items-center gap-1.5">
+        <span class="font-medium text-slate-800">{{ shoot.display_client_name|default:"—" }}</span>
+        <button type="button" title="Edit client name" aria-label="Edit client name"
+                class="p-0.5 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                onclick="event.stopPropagation(); var c=this.closest('.client-name-cell'); c.querySelector('.cn-view').classList.add('hidden'); var f=c.querySelector('form'); f.classList.remove('hidden'); var i=f.querySelector('input[name=client_name]'); i.focus(); i.select();">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5"><path d="M13.586 3.586a2 2 0 1 1 2.828 2.828l-.793.793-2.828-2.828.793-.793ZM11.379 5.793 3 14.172V17h2.828l8.38-8.379-2.83-2.828Z"/></svg>
+        </button>
+    </div>
+    {% if shoot.client_name_override %}
+    <div class="text-[11px] text-slate-400 mt-0.5">Edited{% if shoot.client_name %} · Pipedrive: {{ shoot.client_name }}{% endif %}</div>
+    {% endif %}
+    <form method="post" action="{% url 'edit_client_name' shoot.id %}" class="hidden mt-1 space-y-1"
+          hx-post="{% url 'edit_client_name' shoot.id %}" hx-target="closest .client-name-cell" hx-swap="outerHTML"
+          onkeydown="if(event.key==='Escape'){event.preventDefault(); this.querySelector('[data-cancel]').click();}">
+        {% csrf_token %}
+        <input type="text" name="client_name" value="{{ shoot.display_client_name }}" maxlength="255"
+               placeholder="{{ shoot.client_name|default:'Client name' }}"
+               class="w-44 px-2 py-1 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-400">
+        <div class="flex items-center gap-1.5">
+            <button type="submit" class="px-2 py-0.5 text-xs font-medium rounded bg-slate-900 text-white hover:bg-slate-700">Save</button>
+            <button type="button" data-cancel class="px-2 py-0.5 text-xs font-medium rounded text-slate-600 hover:bg-slate-100"
+                    onclick="var c=this.closest('.client-name-cell'); var f=c.querySelector('form'); f.reset(); f.classList.add('hidden'); c.querySelector('.cn-view').classList.remove('hidden');">Cancel</button>
+        </div>
+        <div class="text-[11px] text-slate-400">Leave blank to use the Pipedrive name.</div>
+    </form>
+</div>
