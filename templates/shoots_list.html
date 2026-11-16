@@ -32,6 +32,7 @@
             <thead class="text-xs uppercase tracking-wide text-slate-500 bg-slate-50">
                 <tr>
                     <th class="px-6 py-3 text-left">Shoot</th>
+                    <th class="px-6 py-3 text-left">Client</th>
                     <th class="px-6 py-3 text-left">Booked</th>
                     <th class="px-6 py-3 text-left">Shoot Date</th>
                     <th class="px-6 py-3 text-left">Location</th>
@@ -43,10 +44,8 @@
                 {% for shoot in shoots %}
                 <tr class="hover:bg-slate-50 cursor-pointer align-top"
                     onclick="if(!event.target.closest('details')) window.location='{% url 'shoot_detail' shoot.id %}'">
-                    <td class="px-6 py-3">
-                        <div class="font-medium">{{ shoot.title|default:"Untitled" }}</div>
-                        {% if shoot.client_name %}<div class="text-xs text-slate-500">{{ shoot.client_name }}</div>{% endif %}
-                    </td>
+                    <td class="px-6 py-3 font-medium">{{ shoot.title|default:"Untitled" }}</td>
+                    <td class="px-6 py-3 text-sm font-medium text-slate-800">{{ shoot.client_name|default:"—" }}</td>
                     <td class="px-6 py-3 text-xs text-slate-500">
                         <div>{{ shoot.created_at|date:"M j, Y" }}</div>
                         <div class="text-slate-400">{{ shoot.created_at|date:"g:i A" }}</div>
