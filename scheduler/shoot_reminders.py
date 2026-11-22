@@ -78,6 +78,12 @@ def sync_shoot_reminders(shoot, now=None):
         return {'created': created}
 
 
+def _footage_link(shoot):
+    """The shoot's page on the PuckPro video site once FOOTAGE_SITE_URL is set; None keeps today's wording."""
+    from .orchestrator import footage_link
+    return footage_link(shoot) or None
+
+
 def render_reminder(shoot, offset_hours, *, details_url=None):
     _now(shoot.shoot_datetime)
     start_time = shoot.shoot_datetime.astimezone(ZoneInfo('America/New_York')).strftime('%I:%M %p %Z').lstrip('0')
@@ -211,7 +217,7 @@ def run_due_reminders(*, sender, validator, now=None, enabled=False, limit=100, 
             continue
         try:
             guid = sender(phone=source.confirmed_videographer.phone,
-                          body=render_reminder(source, row.offset_hours),
+                          body=render_reminder(source, row.offset_hours, details_url=_footage_link(source)),
                           idempotency_key=f'shoot-reminder-{row.pk}')
             if not isinstance(guid, str) or not guid.strip() or len(guid) > 255:
                 raise ValueError('Unconfirmed delivery')

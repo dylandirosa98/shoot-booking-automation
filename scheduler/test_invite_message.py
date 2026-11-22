@@ -44,3 +44,25 @@ class InviteMessageTests(TestCase):
             _invite_message(shoot),
             "<b>Arrive 15-20 minutes before game time</b>",
         )
+
+
+class FootageSiteLinkTests(TestCase):
+    """Today (no FOOTAGE_SITE_URL) nothing changes; once set, the invite and 48h reminder link to the shoot."""
+
+    def setUp(self):
+        self.shoot = Shoot.objects.create(location="Rink", shoot_datetime=timezone.now() + timedelta(days=3), notes="")
+
+    def test_no_link_while_footage_goes_through_drive(self):
+        from .shoot_reminders import render_reminder
+        with self.settings(FOOTAGE_SITE_URL=""):
+            self.assertEqual(_invite_message(self.shoot), "<b>Arrive 15-20 minutes before game time</b>")
+            self.assertNotIn("http", render_reminder(self.shoot, 48, details_url=None))
+
+    def test_invite_and_reminder_link_to_the_shoot_on_the_video_site(self):
+        from .orchestrator import footage_link
+        from .shoot_reminders import _footage_link, render_reminder
+        url = f"https://video.puckpromedia.com/shoot/{self.shoot.id}"
+        with self.settings(FOOTAGE_SITE_URL="https://video.puckpromedia.com"):
+            self.assertEqual(footage_link(self.shoot), url)
+            self.assertIn(f'<a href="{url}">{url}</a>', _invite_message(self.shoot))
+            self.assertIn(url, render_reminder(self.shoot, 48, details_url=_footage_link(self.shoot)))

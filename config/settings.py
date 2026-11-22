@@ -121,6 +121,12 @@ GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT = os.getenv(
     "GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT", "false"
 ).lower() == "true"
 
+# The PuckPro video site (e.g. https://video.puckpromedia.com), for when footage moves off Google Drive.
+# Blank (the default) = today's process, nothing changes. Once set, each shoot's calendar invite and its
+# 48h reminder include "<site>/shoot/<shoot id>": the videographer signs in and lands on that shoot's
+# upload page. (Leave GOOGLE_DRIVE_CREATE_FOLDERS_ON_ACCEPT off at the same time.)
+FOOTAGE_SITE_URL = os.getenv("FOOTAGE_SITE_URL", "").strip().rstrip("/")
+
 PIPEDRIVE_WEBHOOK_SECRET = os.getenv("PIPEDRIVE_WEBHOOK_SECRET", "")
 PIPEDRIVE_API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN", "")
 PIPEDRIVE_COMPANY_DOMAIN = os.getenv("PIPEDRIVE_COMPANY_DOMAIN", "")

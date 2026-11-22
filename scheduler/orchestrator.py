@@ -53,7 +53,19 @@ def _invite_message(shoot: Shoot) -> str:
             "Shoot details / notes from the team:<br>"
             + notes.replace("\n", "<br>")
         )
+    link = footage_link(shoot)
+    if link:
+        sections.append(
+            f'<b>Upload your footage after the game:</b> <a href="{link}">{link}</a><br>'
+            "Sign in to the PuckPro video site and it opens this shoot."
+        )
     return "<br><br>".join(sections)
+
+
+def footage_link(shoot: Shoot) -> str:
+    """This shoot's page on the PuckPro video site, or "" while footage still goes through Google Drive."""
+    base = getattr(settings, "FOOTAGE_SITE_URL", "")
+    return f"{base}/shoot/{shoot.id}" if base and shoot.id else ""
 
 
 def _drive_folder_name(shoot: Shoot) -> str:
