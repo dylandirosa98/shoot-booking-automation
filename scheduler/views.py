@@ -982,3 +982,52 @@ def footage_feed(request):
             for s in shoots
         ],
     })
+
+
+@csrf_exempt
+def footage_assign_videographer(request, shoot_id):
+    """Two-way sync from PuckPro Studio: assign or unassign a shoot's confirmed videographer."""
+    import os
+
+    if request.method != "POST":
+        return JsonResponse({"error": "POST only"}, status=405)
+    secret = os.getenv("FOOTAGE_FEED_SECRET", "")
+    provided = request.headers.get("Authorization", "")
+    if not secret or not hmac.compare_digest(provided.encode(), f"Bearer {secret}".encode()):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"error": "invalid_json"}, status=400)
+
+    shoot = Shoot.objects.filter(pk=shoot_id).first()
+    if not shoot:
+        return JsonResponse({"error": "shoot_not_found"}, status=404)
+    if shoot.status == "cancelled":
+        return JsonResponse({"error": "shoot_cancelled"}, status=409)
+
+    email = (payload.get("email") or "").strip()
+    name = (payload.get("name") or "").strip()
+
+    if not email and not name:
+        shoot.confirmed_videographer = None
+        shoot.status = "pending"
+        shoot.save(update_fields=["status", "confirmed_videographer"])
+        return JsonResponse({"ok": True, "shootId": shoot.id, "status": shoot.status, "videographer": None})
+
+    vid = Videographer.objects.filter(email__iexact=email).first() if email else None
+    if not vid and name:
+        vid = Videographer.objects.filter(name__iexact=name).first()
+    if not vid:
+        return JsonResponse({"error": "videographer_not_found", "email": email, "name": name}, status=404)
+
+    shoot.confirmed_videographer = vid
+    shoot.status = "confirmed"
+    shoot.save(update_fields=["status", "confirmed_videographer"])
+    return JsonResponse({
+        "ok": True,
+        "shootId": shoot.id,
+        "status": shoot.status,
+        "videographer": {"id": vid.id, "name": vid.name, "email": vid.email, "phone": vid.phone},
+    })

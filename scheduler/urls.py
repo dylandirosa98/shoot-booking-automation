@@ -8,6 +8,7 @@ urlpatterns = [
     path("opportunities/", views.game_opportunities, name="game_opportunities"),
     path("api/opportunities/sync/", views.sync_game_opportunities, name="sync_game_opportunities"),
     path("api/footage/shoots/", views.footage_feed, name="footage_feed"),
+    path("api/footage/shoots/<int:shoot_id>/assign/", views.footage_assign_videographer, name="footage_assign_videographer"),
     path("api/shoots/client-names/sync/", views.sync_client_names, name="sync_client_names"),
     path("shoots/<int:shoot_id>/", views.shoot_detail, name="shoot_detail"),
     path("shoots/<int:shoot_id>/client-name/", views.edit_client_name, name="edit_client_name"),

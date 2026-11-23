@@ -40,3 +40,43 @@ class FootageFeedTests(TestCase):
 
     def test_read_only(self):
         self.assertEqual(self.client.post("/api/footage/shoots/").status_code, 405)
+
+    def test_assign_and_unassign_videographer(self):
+        other = Videographer.objects.create(name="Sam Shoot", email="sam@example.com", phone="555-0101", state="NJ", rating=4.8)
+        with mock.patch.dict("os.environ", {"FOOTAGE_FEED_SECRET": "s3cret"}):
+            # Unauthorized rejected
+            r = self.client.post(f"/api/footage/shoots/{self.pending.id}/assign/", data='{"email":"sam@example.com"}', content_type="application/json")
+            self.assertEqual(r.status_code, 401)
+
+            # Assign pending shoot -> confirmed with videographer
+            r = self.client.post(
+                f"/api/footage/shoots/{self.pending.id}/assign/",
+                data='{"email":"SAM@example.com"}',
+                content_type="application/json",
+                HTTP_AUTHORIZATION="Bearer s3cret",
+            )
+            self.assertEqual(r.status_code, 200)
+            self.pending.refresh_from_db()
+            self.assertEqual(self.pending.status, "confirmed")
+            self.assertEqual(self.pending.confirmed_videographer_id, other.id)
+
+            # Unassign -> pending with no videographer
+            r = self.client.post(
+                f"/api/footage/shoots/{self.pending.id}/assign/",
+                data='{"email":null}',
+                content_type="application/json",
+                HTTP_AUTHORIZATION="Bearer s3cret",
+            )
+            self.assertEqual(r.status_code, 200)
+            self.pending.refresh_from_db()
+            self.assertEqual(self.pending.status, "pending")
+            self.assertIsNone(self.pending.confirmed_videographer_id)
+
+            # Unknown videographer -> 404
+            r = self.client.post(
+                f"/api/footage/shoots/{self.pending.id}/assign/",
+                data='{"email":"nobody@example.com"}',
+                content_type="application/json",
+                HTTP_AUTHORIZATION="Bearer s3cret",
+            )
+            self.assertEqual(r.status_code, 404)
