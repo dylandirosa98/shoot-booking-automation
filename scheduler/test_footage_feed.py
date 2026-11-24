@@ -4,7 +4,7 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from .models import Shoot, Videographer
+from .models import Invite, Shoot, Videographer, VideographerServiceState
 
 
 class FootageFeedTests(TestCase):
@@ -80,3 +80,59 @@ class FootageFeedTests(TestCase):
                 HTTP_AUTHORIZATION="Bearer s3cret",
             )
             self.assertEqual(r.status_code, 404)
+
+    def test_feed_includes_active_videographer_roster_and_recommendations_scores(self):
+        self.vid.lat = 39.75
+        self.vid.lng = -75.15
+        self.vid.city = "Sewell"
+        self.vid.save()
+        VideographerServiceState.objects.create(videographer=self.vid, state="NJ")
+        VideographerServiceState.objects.create(videographer=self.vid, state="PA")
+        far = Videographer.objects.create(
+            name="Far Vid", email="far@example.com", phone="555-0200",
+            state="MA", city="Boston", lat=42.36, lng=-71.06, rating=4.9, active=True,
+        )
+        Videographer.objects.create(
+            name="Inactive Vid", email="old@example.com", state="NJ", rating=5.0, active=False,
+        )
+        self.pending.lat = 39.96
+        self.pending.lng = -75.60
+        self.pending.save()
+        Invite.objects.create(
+            shoot=self.pending, videographer=far, rank=0, score=3.1,
+            drive_minutes=200, drive_miles=150, status="declined",
+            expires_at=timezone.now() + timedelta(hours=24),
+        )
+
+        # Feed returns all active videographers (not inactive) with state, serviceStates, rating
+        r = self.get("Bearer s3cret")
+        self.assertEqual(r.status_code, 200)
+        roster = r.json()["videographers"]
+        self.assertEqual({v["email"] for v in roster}, {"vic@example.com", "far@example.com"})
+        vic_row = next(v for v in roster if v["email"] == "vic@example.com")
+        self.assertEqual(vic_row["serviceStates"], ["NJ", "PA"])
+        self.assertEqual(vic_row["rating"], 4.5)
+
+        # Recommendations endpoint requires auth and returns drive-time scores + invites
+        with mock.patch.dict("os.environ", {"FOOTAGE_FEED_SECRET": "s3cret"}):
+            self.assertEqual(self.client.get("/api/footage/recommendations/").status_code, 401)
+            rec = self.client.get(
+                f"/api/footage/recommendations/?shootIds={self.pending.id}",
+                HTTP_AUTHORIZATION="Bearer s3cret",
+            )
+            self.assertEqual(rec.status_code, 200)
+            body = rec.json()
+            self.assertEqual({v["email"] for v in body["videographers"]}, {"vic@example.com", "far@example.com"})
+            shoot_data = body["shoots"][str(self.pending.id)]
+            self.assertEqual(shoot_data["ranked"][0]["email"], "vic@example.com")
+            self.assertTrue(shoot_data["ranked"][0]["withinMaxDrive"])
+            self.assertGreater(shoot_data["ranked"][0]["score"], shoot_data["ranked"][1]["score"])
+            self.assertEqual(shoot_data["invites"][0], {
+                "email": "far@example.com",
+                "name": "Far Vid",
+                "status": "declined",
+                "rank": 0,
+                "score": 3.1,
+                "driveMinutes": 200,
+                "driveMiles": 150.0,
+            })

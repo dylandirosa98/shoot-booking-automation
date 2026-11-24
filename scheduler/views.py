@@ -962,8 +962,27 @@ def footage_feed(request):
             return None
         return {"id": v.id, "name": v.name, "email": v.email, "phone": v.phone}
 
+    def roster_person(v):
+        return {
+            "id": v.id,
+            "name": v.name,
+            "email": v.email,
+            "phone": v.phone,
+            "state": v.state,
+            "serviceStates": v.service_state_codes,
+            "city": v.city,
+            "rating": v.rating,
+        }
+
+    active_videographers = (
+        Videographer.objects.filter(active=True)
+        .prefetch_related("service_states")
+        .order_by("state", "-rating", "name")
+    )
+
     return JsonResponse({
         "generatedAt": now.isoformat(),
+        "videographers": [roster_person(v) for v in active_videographers],
         "shoots": [
             {
                 "id": s.id,
@@ -981,6 +1000,109 @@ def footage_feed(request):
             }
             for s in shoots
         ],
+    })
+
+
+def footage_recommendations(request):
+    """Read-only active videographer roster, drive-time/rating scores, and invite statuses for PuckPro Studio."""
+    import os
+    from datetime import timedelta
+    from .distance import estimate_drive
+    from .models import SchedulingSettings
+
+    if request.method != "GET":
+        return JsonResponse({"error": "GET only"}, status=405)
+    secret = os.getenv("FOOTAGE_FEED_SECRET", "")
+    provided = request.headers.get("Authorization", "")
+    if not secret or not hmac.compare_digest(provided.encode(), f"Bearer {secret}".encode()):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    now = timezone.now()
+    cfg = SchedulingSettings.get()
+    active_vids = list(
+        Videographer.objects.filter(active=True)
+        .prefetch_related("service_states")
+        .order_by("state", "-rating", "name")
+    )
+
+    raw_ids = (request.GET.get("shootIds") or "").strip()
+    if raw_ids:
+        shoot_ids = [int(tok) for tok in raw_ids.split(",") if tok.strip().isdigit()][:100]
+        shoots_qs = Shoot.objects.filter(pk__in=shoot_ids).prefetch_related("invites__videographer")
+    else:
+        shoots_qs = (
+            Shoot.objects.filter(
+                shoot_datetime__gte=now - timedelta(days=FOOTAGE_FEED_PAST_DAYS),
+                shoot_datetime__lte=now + timedelta(days=FOOTAGE_FEED_FUTURE_DAYS),
+                status__in=["pending", "failed"],
+            )
+            .prefetch_related("invites__videographer")
+            .order_by("shoot_datetime")[:200]
+        )
+
+    shoots_out = {}
+    for s in shoots_qs:
+        invites = [
+            {
+                "email": inv.videographer.email,
+                "name": inv.videographer.name,
+                "status": inv.status,
+                "rank": inv.rank,
+                "score": round(inv.score, 3),
+                "driveMinutes": round(inv.drive_minutes) if inv.drive_minutes is not None else None,
+                "driveMiles": round(inv.drive_miles, 1) if inv.drive_miles is not None else None,
+            }
+            for inv in s.invites.all()
+        ]
+        ranked = []
+        if s.lat is not None and s.lng is not None:
+            for v in active_vids:
+                if v.lat is None or v.lng is None:
+                    continue
+                miles, minutes = estimate_drive(s.lat, s.lng, v.lat, v.lng)
+                score = v.rating - (minutes * cfg.score_penalty_per_minute)
+                ranked.append({
+                    "email": v.email,
+                    "name": v.name,
+                    "state": v.state,
+                    "serviceStates": v.service_state_codes,
+                    "rating": v.rating,
+                    "score": round(score, 3),
+                    "driveMiles": round(miles, 1),
+                    "driveMinutes": round(minutes),
+                    "withinMaxDrive": minutes <= cfg.max_drive_minutes,
+                })
+            ranked.sort(key=lambda item: (-item["score"], item["driveMinutes"], item["name"]))
+        shoots_out[str(s.id)] = {
+            "id": s.id,
+            "status": s.status,
+            "lat": s.lat,
+            "lng": s.lng,
+            "invites": invites,
+            "ranked": ranked,
+        }
+
+    return JsonResponse({
+        "generatedAt": now.isoformat(),
+        "settings": {
+            "scorePenaltyPerMinute": cfg.score_penalty_per_minute,
+            "maxDriveMinutes": cfg.max_drive_minutes,
+            "sameStateOnly": cfg.same_state_only,
+        },
+        "videographers": [
+            {
+                "id": v.id,
+                "name": v.name,
+                "email": v.email,
+                "phone": v.phone,
+                "state": v.state,
+                "serviceStates": v.service_state_codes,
+                "city": v.city,
+                "rating": v.rating,
+            }
+            for v in active_vids
+        ],
+        "shoots": shoots_out,
     })
 
 
